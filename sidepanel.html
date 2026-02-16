@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Mod</title>
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+  <div id="app">
+    <div id="header">
+      <h1>Mod</h1>
+      <div id="header-actions">
+        <button id="btn-select" title="Select an element on the page">Select</button>
+        <button id="btn-mods" title="View saved mods for this site">Mods</button>
+        <button id="btn-settings" title="Settings">Settings</button>
+      </div>
+    </div>
+
+    <div id="page-info">
+      <span id="page-hostname">—</span>
+      <span id="mod-count"></span>
+      <label id="mods-toggle-wrap" class="mods-toggle">
+        <input type="checkbox" id="mods-enabled-toggle" checked>
+        <span id="mods-toggle-label">Mods on</span>
+      </label>
+    </div>
+
+    <div id="chat-view" class="view active">
+      <div id="messages"></div>
+      <div id="input-area">
+        <textarea id="user-input" placeholder="Describe what you want to change..." rows="2"></textarea>
+        <button id="btn-send">Send</button>
+      </div>
+    </div>
+
+    <div id="mods-view" class="view">
+      <div id="mods-list"></div>
+      <button id="btn-back-chat" class="back-btn">Back to chat</button>
+    </div>
+
+    <div id="settings-view" class="view">
+      <label>
+        Claude API Key
+        <input type="password" id="api-key-input" placeholder="sk-ant-...">
+      </label>
+      <p class="hint">Your key is stored locally and never sent anywhere except api.anthropic.com</p>
+      <button id="btn-save-settings">Save</button>
+      <button id="btn-back-chat-2" class="back-btn">Back to chat</button>
+    </div>
+
+    <div id="selecting-indicator" class="hidden">
+      Click any element on the page... (Esc to cancel)
+    </div>
+  </div>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>
