@@ -72,6 +72,12 @@ You may include a brief explanation outside the JSON block, but ALWAYS include t
     await updateActiveTab();
     chrome.runtime.onMessage.addListener(handleMessage);
 
+    chrome.runtime.sendMessage({
+      type: 'POSTHOG_CAPTURE',
+      event: 'side_panel_opened',
+      properties: { hostname: currentHostname }
+    }).catch(() => {});
+
     document.getElementById('btn-send').addEventListener('click', sendMessage);
     document.getElementById('user-input').addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
@@ -166,12 +172,18 @@ You may include a brief explanation outside the JSON block, but ALWAYS include t
     const msgEl = document.createElement('div');
     msgEl.className = `message ${role}`;
 
+    const contentEl = document.createElement('div');
+    contentEl.className = 'message-content';
+
     if (isCode) {
-      msgEl.innerHTML = `<pre><code>${escapeHtml(content)}</code></pre>`;
+      contentEl.innerHTML = `<pre><code>${escapeHtml(content)}</code></pre>`;
+    } else if (role === 'assistant' || role === 'system') {
+      contentEl.innerHTML = renderMarkdownToHtml(content);
     } else {
-      msgEl.textContent = content;
+      contentEl.innerHTML = escapeHtml(content).replace(/\n/g, '<br>');
     }
 
+    msgEl.appendChild(contentEl);
     messagesEl.appendChild(msgEl);
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }
@@ -307,11 +319,20 @@ You may include a brief explanation outside the JSON block, but ALWAYS include t
     }
   }
 
+  function generateTraceId() {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+      const r = Math.random() * 16 | 0;
+      const v = c === 'x' ? r : (r & 0x3 | 0x8);
+      return v.toString(16);
+    });
+  }
+
   async function sendMessage() {
     const input = document.getElementById('user-input');
     const text = input.value.trim();
     if (!text) return;
 
+    const hadElementContext = !!selectedElementContext;
     input.value = '';
     addMessage('user', text);
 
@@ -347,13 +368,21 @@ You may include a brief explanation outside the JSON block, but ALWAYS include t
     const fullMessage = contextPrefix + text;
     conversationHistory.push({ role: 'user', content: fullMessage });
 
+    const traceId = generateTraceId();
+    chrome.runtime.sendMessage({
+      type: 'POSTHOG_CAPTURE',
+      event: 'message_sent',
+      properties: { has_element_context: hadElementContext, hostname: currentHostname }
+    }).catch(() => {});
+
     addSystemMessage('Thinking...');
 
     const response = await chrome.runtime.sendMessage({
       type: 'CALL_AI',
       messages: conversationHistory,
       systemPrompt: SYSTEM_PROMPT,
-      apiKey: apiKey
+      apiKey: apiKey,
+      traceId: traceId
     });
 
     const msgs = document.getElementById('messages');
@@ -413,6 +442,12 @@ You may include a brief explanation outside the JSON block, but ALWAYS include t
       }
     };
     document.addEventListener('keydown', escapeListener);
+
+    chrome.runtime.sendMessage({
+      type: 'POSTHOG_CAPTURE',
+      event: 'selector_activated',
+      properties: { hostname: currentHostname }
+    }).catch(() => {});
 
     chrome.runtime.sendMessage({
       type: 'SEND_TO_CONTENT',
@@ -500,6 +535,11 @@ You may include a brief explanation outside the JSON block, but ALWAYS include t
     apiKey = key;
     const current = (await chrome.storage.local.get('settings')).settings || {};
     await chrome.storage.local.set({ settings: { ...current, apiKey: key } });
+    chrome.runtime.sendMessage({
+      type: 'POSTHOG_CAPTURE',
+      event: 'settings_saved',
+      properties: { field: 'api_key' }
+    }).catch(() => {});
     addSystemMessage('API key saved.');
     showView('chat');
   }
@@ -528,6 +568,34 @@ You may include a brief explanation outside the JSON block, but ALWAYS include t
     const div = document.createElement('div');
     div.textContent = str;
     return div.innerHTML;
+  }
+
+  /**
+   * Renders markdown-like text to safe HTML (escape first, then convert ** * ` ``` newlines).
+   */
+  function renderMarkdownToHtml(text) {
+    if (text == null) return '';
+    let s = escapeHtml(text);
+
+    // Code blocks (```...```) - process before inline so we don't touch content inside
+    s = s.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, _lang, code) => {
+      return '<pre class="md-block"><code>' + code.replace(/^\n|\n$/g, '') + '</code></pre>';
+    });
+
+    // Inline code (`...`)
+    s = s.replace(/`([^`]+)`/g, '<code class="md-inline">$1</code>');
+
+    // Bold **...** or __...__
+    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+
+    // Italic *...* (after bold; skip _ to avoid clashing with __ in bold)
+    s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+
+    // Line breaks
+    s = s.replace(/\n/g, '<br>');
+
+    return s;
   }
 
   init();

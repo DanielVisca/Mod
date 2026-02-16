@@ -60,6 +60,28 @@ To reduce the broad “access all sites” warning, a future version can use **o
 
 ---
 
+## PostHog analytics
+
+The extension sends events to PostHog via the [Capture API](https://posthog.com/docs/api/capture) for product and LLM analytics.
+
+- **Distinct ID:** A UUID is generated on first run and stored in `chrome.storage.local` under `posthog_distinct_id` (one per install).
+- **API key:** Set in `background.js` as `POSTHOG_API_KEY`. To disable analytics, remove or comment out the `posthogCapture` calls, or set the key to an empty string and add a guard at the start of `posthogCapture`.
+- **Events captured:**
+  - `extension_installed` — once per install (version).
+  - `side_panel_opened` — when the side panel loads (hostname).
+  - `message_sent` — when the user sends a chat message (has_element_context, hostname).
+  - `$ai_generation` — each Claude call: model, provider, input/output messages, token counts, latency, errors (per [PostHog LLM docs](https://posthog.com/docs/llm-analytics/manual-capture)).
+  - `selector_activated` — user clicked Select (hostname).
+  - `element_selected` — user selected an element (hostname, tag).
+  - `selector_cancelled` — user cancelled with Escape.
+  - `mod_saved` — mod saved for a host (hostname, mod_type, mod_description).
+  - `mod_deleted` — mod deleted (hostname).
+  - `mod_toggled` — mod enabled/disabled (hostname, enabled).
+  - `mods_disabled_all` — panic used (hostname, mod_count).
+  - `settings_saved` — API key saved (field only, no value).
+
+---
+
 ## Developer logging
 
 - **Page (content script):** Open DevTools on the **web page** (F12 or right‑click → Inspect → Console). All Mod actions are logged with the `[Mod]` prefix so you can filter by “Mod”. You’ll see: content script load, how many mods are applied and for which hostname, each mod applied/failed, REFRESH_MODS_STATE (toggle), APPLY_MOD / REMOVE_MOD, selector warnings, and panic (Ctrl+Shift+M).
