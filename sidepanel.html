@@ -23,6 +23,12 @@
         <input type="checkbox" id="mods-enabled-toggle" checked>
         <span id="mods-toggle-label">Mods on</span>
       </label>
+      <button id="btn-set-goal" type="button" class="btn-set-goal" title="Set a conversation goal">Set goal</button>
+    </div>
+    <div id="goal-bar" class="goal-bar hidden">
+      <span id="goal-label">Goal:</span>
+      <span id="goal-text"></span>
+      <button id="btn-clear-goal" type="button">Clear goal</button>
     </div>
 
     <div id="chat-view" class="view active">
@@ -34,7 +40,30 @@
     </div>
 
     <div id="mods-view" class="view">
-      <div id="mods-list"></div>
+      <div id="mods-list-wrap">
+        <div id="mods-list"></div>
+        <div id="import-mod-section" class="import-section">
+        <label>Import a shared mod</label>
+        <textarea id="import-mod-input" placeholder="Paste mod link (mod:...) or JSON here" rows="2"></textarea>
+        <button id="btn-import-mod">Add to this site</button>
+        <p id="import-mod-feedback" class="import-feedback" aria-live="polite"></p>
+      </div>
+      </div>
+      <div id="mod-detail-view" class="mod-detail-view hidden">
+        <div id="mod-detail-back" class="back-btn">Back to list</div>
+        <h2 id="mod-detail-title" class="mod-detail-title"></h2>
+        <div id="mod-detail-type" class="mod-detail-meta"></div>
+        <p id="mod-detail-what" class="mod-detail-what"></p>
+        <p id="mod-detail-affects" class="mod-detail-affects"></p>
+        <div id="mod-detail-dates" class="mod-detail-dates"></div>
+        <div id="mod-detail-revisions" class="mod-detail-revisions hidden"></div>
+        <div class="mod-detail-actions">
+          <button id="mod-detail-refine" class="btn-detail-action">Refine this mod</button>
+          <button id="mod-detail-revert" class="btn-detail-action" title="Restore the previous version (before the last refinement)">Revert to previous</button>
+          <button id="mod-detail-preview" class="btn-detail-action">Preview only this mod</button>
+          <button id="mod-detail-stop-preview" class="btn-detail-action hidden">Stop preview</button>
+        </div>
+      </div>
       <button id="btn-back-chat" class="back-btn">Back to chat</button>
     </div>
 

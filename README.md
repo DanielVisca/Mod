@@ -1,110 +1,112 @@
 # Mod — AI that sees and modifies any website, persistently
 
-A Chrome extension that lets you point at elements or describe changes in chat. The AI generates CSS or “hide element” modifications; they run immediately and re-apply on every future visit.
+A **Chrome extension** that lets you change any site in plain English: describe what you want (or select an element), and the AI suggests CSS or “hide element” mods. Apply & Save once; Mod re-applies on every visit to that site.
 
-**One-sentence test:** Install Mod, click that annoying banner on a site, tell it to hide it forever, and it’s gone on every page load.
+**→ Coming back after a while? Read [PROJECT.md](./PROJECT.md) first:** short reminder of what it does, setup, current state, vision, and concerns.
+
+---
+
+## What Mod does
+
+- **Chat with the AI** in a side panel. You type (“hide the cookie banner”, “make the header darker”) or **Select** an element on the page and describe the change.
+- **Agent tools** run in the page: page summary, structure, components, framework detection, find elements by text, simulate mod effect. The AI can use up to **5 tool rounds** per message to inspect then suggest.
+- **One mod per suggestion:** CSS, hide by selector, or **hide by text** (for dynamic feeds like Instagram/Twitter where class names change). You **Apply & Save**, **Preview**, or **Reject**.
+- **Refine in chat:** After saving, say “make it bigger” or “also hide X” — the same mod is updated. **Revert to previous** from the Mod detail view if a refinement breaks something.
+- **Conversation goal:** Optional “Set goal” (e.g. “Hide suggested posts on Instagram”); the AI keeps context until you clear it or say “done.”
+- **Did this work?** After Apply & Save you get Yes/No; **No** sends a re-investigate message so the agent can suggest a different mod.
+- **DevTools:** If you have DevTools open and select an element in the Elements panel, Mod can use that **$0** as context. For `find_elements_containing_text`, when DevTools is open the search runs in the page for accurate minimal-node results.
+- **Panic:** **Ctrl+Shift+M** disables all mods for the current site and reloads.
 
 ---
 
 ## Requirements
 
-- **Chrome 114 or later** (Manifest V3; Side Panel API).
-- **Chrome only.** Firefox uses a different sidebar model; Edge may work but is not tested.
-- **Host permission:** The extension requests access to all sites (`<all_urls>`). Chrome will show “Read and change all your data on all websites.” Mod needs this to inject and re-apply your modifications. It does not send page data anywhere except when you explicitly ask the AI to analyze an element (to Claude via your API key). A future version may use **optional host permissions** and request access per site on first use.
+- **Chrome 114+** (Manifest V3, Side Panel API). Chrome only; Firefox/Edge not tested.
+- **Host permission:** Mod requests `<all_urls>` so it can inject and re-apply mods. It does not send page content off-device except to Claude when you use chat (your API key). A future version may use optional host permissions per site.
 
 ---
 
-## Installation (unpacked)
+## Setup
 
-1. Open `chrome://extensions`.
-2. Turn on **Developer mode** (top right).
-3. Click **Load unpacked** and select this folder (`Tinker`).
-4. Ensure no errors are shown. Click the extension icon to open the side panel.
-5. In **Settings**, add your Claude API key. Your key is stored locally and only used for requests to `api.anthropic.com`.
+1. Open **Chrome** → `chrome://extensions`.
+2. Enable **Developer mode** (top right).
+3. **Load unpacked** → select this repo folder.
+4. Click the Mod icon to open the side panel. Go to **Settings** and add your **Claude API key** (stored locally; used only for `api.anthropic.com`).
+
+No build step. No npm. Clone and load.
 
 ---
 
 ## Usage
 
-1. Open any website, then open Mod from the toolbar (side panel).
-2. **Select an element:** Click **Select**, then click an element on the page. Describe what you want (e.g. “hide this forever”, “make this text bigger”).
-3. **Or describe without selecting:** Type what you want (e.g. “hide the cookie banner”) and send. The AI uses lightweight page context (headings, buttons, banners) to suggest a mod.
-4. When the AI returns a modification, use **Apply & Save** to apply it and persist it for this site, or **Preview** to try it without saving. Refresh the page to see saved mods re-apply.
-5. Use **Mods** to see, toggle, or delete saved mods for the current site.
-6. **Panic button:** If a mod breaks the page, press **Ctrl+Shift+M** to disable all mods for the current site and reload.
-
-7. **Preview with/without mods:** Use the **Mods on / Mods off** toggle in the side panel. When **Mods off**, the page is shown without any saved mods (no refresh). Toggle back to **Mods on** to re-apply. Helps verify that mods are applied correctly.
+1. Open a **website** (http/https), then open Mod from the toolbar.
+2. **Option A — Select:** Click **Select**, click an element on the page, then describe the change in chat.
+3. **Option B — Describe:** Type what you want (“hide the cookie banner”, “hide Sponsored posts”). The AI uses page context and tools to suggest a mod.
+4. When the AI returns a mod: **Apply & Save** (persist for this site), **Preview** (try without saving), or **Reject**.
+5. After saving, you can **refine** in chat (“make it bigger”) or open **Mods** → select a mod → **Revert to previous** if the last refinement broke something.
+6. **Mods** tab: list, toggle, delete, **Share** (copy link). Others paste the link under **Import a shared mod** and click **Add to this site**.
+7. **Mods on / off** toggle: turn off to see the page without mods; turn back on to re-apply (no refresh).
+8. **Panic:** Ctrl+Shift+M if a mod breaks the page.
 
 ---
 
-## What Mod can do (MVP)
+## What Mod can do (feature set)
 
-- **CSS mods** — Change styles (colors, fonts, spacing, etc.) via injected CSS with `!important`.
-- **Hide elements** — Hide elements by selector (e.g. banners, sidebars). Uses `display: none !important`.
+| Feature | Description |
+|--------|-------------|
+| **CSS mods** | Injected CSS with `!important` (colors, fonts, spacing, etc.). |
+| **Hide by selector** | `display: none !important` on elements matching a CSS selector. |
+| **Hide by text** | For dynamic feeds (Instagram, Twitter, etc.): find nodes containing text (e.g. “Sponsored”, “Ad”) and hide an ancestor (the post/card). Type `dom-hide-contains-text`; uses `find_elements_containing_text` and optional `simulate_mod_effect`. |
+| **Agent tools** | `get_page_summary`, `get_structure`, `search_components`, `detect_framework`, `get_component_summary`, `get_element_info`, `find_elements_containing_text`, `simulate_mod_effect`. |
+| **Revert** | In Mod detail, **Revert to previous** restores the version before the last refinement (snapshots stored on each update). |
+| **Goal** | Set a conversation goal; cleared when you say “done”/“that’s good” or click Clear goal. |
+| **DevTools $0** | When DevTools is open for the tab, the selected element is sent as context; `find_elements_containing_text` runs in-page when DevTools is connected. |
 
-**Not supported in this version:**
-
-- **JavaScript mods** — Running custom JS in the page is not supported (Chrome MV3 content script restrictions). Use CSS or “hide element” instead.
+**Not supported:** JavaScript mods (MV3 limits). CSS and hide-only.
 
 ---
 
 ## Mods and site changes
 
-Mods are stored **per hostname** and applied by **CSS selectors**. If a site changes its layout or class names (common on React/Vue/Angular and after redesigns), a mod may **stop matching** and no longer apply. There is no automatic fix; you can add a new mod or re-select the element in a future version. Mods may also match more than intended (e.g. many elements); if a selector matches more than 10 elements, Mod will ask you to confirm before applying.
-
----
-
-## Optional host permissions (future)
-
-To reduce the broad “access all sites” warning, a future version can use **optional host permissions**: request access only when the user first uses Mod on a given site. This adds some UX and implementation complexity and is out of scope for the current MVP.
-
----
-
-## PostHog analytics
-
-The extension sends events to PostHog via the [Capture API](https://posthog.com/docs/api/capture) for product and LLM analytics.
-
-- **Distinct ID:** A UUID is generated on first run and stored in `chrome.storage.local` under `posthog_distinct_id` (one per install).
-- **API key:** Set in `background.js` as `POSTHOG_API_KEY`. To disable analytics, remove or comment out the `posthogCapture` calls, or set the key to an empty string and add a guard at the start of `posthogCapture`.
-- **Events captured:**
-  - `extension_installed` — once per install (version).
-  - `side_panel_opened` — when the side panel loads (hostname).
-  - `message_sent` — when the user sends a chat message (has_element_context, hostname).
-  - `$ai_generation` — each Claude call: model, provider, input/output messages, token counts, latency, errors (per [PostHog LLM docs](https://posthog.com/docs/llm-analytics/manual-capture)).
-  - `selector_activated` — user clicked Select (hostname).
-  - `element_selected` — user selected an element (hostname, tag).
-  - `selector_cancelled` — user cancelled with Escape.
-  - `mod_saved` — mod saved for a host (hostname, mod_type, mod_description).
-  - `mod_deleted` — mod deleted (hostname).
-  - `mod_toggled` — mod enabled/disabled (hostname, enabled).
-  - `mods_disabled_all` — panic used (hostname, mod_count).
-  - `settings_saved` — API key saved (field only, no value).
-
----
-
-## Developer logging
-
-- **Page (content script):** Open DevTools on the **web page** (F12 or right‑click → Inspect → Console). All Mod actions are logged with the `[Mod]` prefix so you can filter by “Mod”. You’ll see: content script load, how many mods are applied and for which hostname, each mod applied/failed, REFRESH_MODS_STATE (toggle), APPLY_MOD / REMOVE_MOD, selector warnings, and panic (Ctrl+Shift+M).
-- **Background:** In `chrome://extensions`, click “Service worker” under the Mod extension to open the background console. Logs are prefixed with `[Mod BG]` (e.g. when a mod is saved, or all mods disabled for a host).
-
-Use these logs to confirm mods are loading, when they’re applied, and where something fails.
+Mods are stored **per hostname** and applied by selectors. Site redesigns or changed class names can make a mod stop matching or match too much. There’s no auto-fix; add a new mod or refine. If a selector matches many elements, Mod may ask for confirmation before applying.
 
 ---
 
 ## File layout
 
-- `manifest.json` — Permissions, content script, side panel, background worker.
-- `background.js` — Service worker: message routing, Claude API, storage (save/delete/toggle mods, disable all for host).
-- `content.js` — Runs in each tab: apply saved mods on load, element selector, context extraction, apply/remove mods, panic shortcut (Ctrl+Shift+M), selector match-count check.
-- `sidepanel.html` / `sidepanel.js` / `sidepanel.css` — Side panel UI: chat, mod list, settings, Apply/Preview using mod keys (no raw JSON in attributes).
-- `icons/` — Extension icons (16, 48, 128 px).
+| File | Role |
+|------|------|
+| `manifest.json` | Permissions, side panel, devtools page, content script, icons. |
+| `background.js` | Service worker: message routing, Claude API, storage (mods, settings, last applied, revert), PostHog. |
+| `content.js` | Injected in tabs: apply saved mods, element selector, page context & agent tools, apply/remove mods, panic. |
+| `sidepanel.html` / `sidepanel.js` / `sidepanel.css` | Side panel: chat, mod list, settings, goal, “Did this work?”, agent loop. |
+| `devtools.html` / `devtools.js` | DevTools page: `find_elements_containing_text` in page, $0 context. |
+| `icons/` | Extension icons (16, 48, 128 px). |
 
 ---
 
 ## Storage
 
-- **Mods:** `chrome.storage.local` under keys `mods:{hostname}`, value: array of `{ id, type, description, selector, code, enabled, createdAt }`. Types: `css`, `dom-hide`.
-- **Settings:** key `settings`, value `{ apiKey }`.
+- **Mods:** `chrome.storage.local` → `mods:{hostname}` (array of mods; each can have `revisions` with snapshots for revert).
+- **Settings:** `settings` → `{ apiKey, modsEnabled }`.
+- **Last applied mod:** `lastAppliedMod_{hostname}` (for refinements).
+- **Conversation goal:** `conversationGoal_{hostname}`.
+
+---
+
+## PostHog analytics
+
+Events are sent to PostHog (see `background.js` → `POSTHOG_API_KEY`). If the key is empty, capture is skipped.
+
+**Events:** `extension_installed`, `side_panel_opened`, `view_changed`, `message_sent` (incl. `indicates_mod_failure`), `apply_and_save`, `mod_saved`, `mod_deleted`, `mod_toggled`, `mod_reverted`, `mods_disabled_all`, `mod_rejected`, `did_this_work_no`, `goal_set`, `goal_cleared`, `mod_previewed` (source: chat/detail), `mod_shared`, `refinement_started`, `refinement_auto_applied`, `agent_tools_used`, `selector_activated`, `element_selected`, `selector_cancelled`, `mod_imported`, `settings_saved`, `$ai_generation` (model, tokens, latency, errors).
+
+---
+
+## Developer notes
+
+- **Content script logs:** DevTools on the **web page** → Console → filter by `[Mod]`.
+- **Background logs:** `chrome://extensions` → Mod → **Service worker** → console, prefix `[Mod BG]`.
+- **Disable analytics:** Clear or omit `POSTHOG_API_KEY` in `background.js`.
 
 ---
 

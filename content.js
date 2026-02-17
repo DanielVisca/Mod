@@ -30,10 +30,69 @@
   // PART 1: Apply saved mods on page load
   // =========================================
 
+  const domHideContainsTextObservers = {};
+  const domHideContainsTextDebounce = {};
+
+  function runDomHideContainsTextInSubtree(mod, root) {
+    const text = (mod.params && mod.params.text) ? String(mod.params.text).trim() : '';
+    const level = typeof (mod.params && mod.params.hideAncestorLevel) === 'number' ? mod.params.hideAncestorLevel : 0;
+    const modId = mod.id;
+    if (!text || !root) return;
+    const search = text.toLowerCase();
+    function walk(el) {
+      if (el.nodeType !== 1) return;
+      const raw = el.textContent || '';
+      if (!raw.toLowerCase().includes(search)) {
+        for (let i = 0; i < el.children.length; i++) walk(el.children[i]);
+        return;
+      }
+      for (let i = 0; i < el.children.length; i++) {
+        const c = el.children[i];
+        if (c.nodeType === 1 && (c.textContent || '').toLowerCase().includes(search)) {
+          for (let j = 0; j < el.children.length; j++) walk(el.children[j]);
+          return;
+        }
+      }
+      let ancestor = el;
+      for (let i = 0; i < level && ancestor; i++) ancestor = ancestor.parentElement;
+      if (ancestor && !ancestor.dataset.modHiddenBy) {
+        ancestor.style.setProperty('display', 'none', 'important');
+        ancestor.dataset.modHiddenBy = modId;
+      }
+      for (let i = 0; i < el.children.length; i++) walk(el.children[i]);
+    }
+    walk(root);
+  }
+
+  function runDomHideContainsText(mod) {
+    const containerSelector = mod.params && mod.params.containerSelector;
+    const root = containerSelector ? document.querySelector(containerSelector) : document.body;
+    if (!root) return;
+    runDomHideContainsTextInSubtree(mod, root);
+  }
+
+  function removeDomHideContainsText(modId) {
+    const obs = domHideContainsTextObservers[modId];
+    if (obs) {
+      obs.disconnect();
+      delete domHideContainsTextObservers[modId];
+    }
+    const tid = domHideContainsTextDebounce[modId];
+    if (tid) {
+      clearTimeout(tid);
+      delete domHideContainsTextDebounce[modId];
+    }
+    document.querySelectorAll(`[data-mod-hidden-by="${modId}"]`).forEach(el => {
+      el.style.removeProperty('display');
+      delete el.dataset.modHiddenBy;
+    });
+  }
+
   function removeAllModStyles() {
     const styles = document.querySelectorAll('style[data-mod-id]');
     styles.forEach(s => s.remove());
-    log('Removed all mod style tags', { count: styles.length });
+    Object.keys(domHideContainsTextObservers).forEach(modId => removeDomHideContainsText(modId));
+    log('Removed all mod style tags and dom-hide-contains-text', { count: styles.length });
   }
 
   async function applySavedMods() {
@@ -85,6 +144,31 @@
       style.dataset.modId = mod.id;
       style.textContent = `${mod.selector} { display: none !important; }`;
       document.head.appendChild(style);
+    } else if (mod.type === 'dom-hide-contains-text' && mod.params && typeof mod.params.text === 'string') {
+      removeDomHideContainsText(mod.id);
+      runDomHideContainsText(mod);
+      const containerSelector = mod.params.containerSelector;
+      const root = containerSelector ? document.querySelector(containerSelector) : document.body;
+      if (root) {
+        const observer = new MutationObserver(mutations => {
+          const added = [];
+          for (const m of mutations) {
+            for (const n of m.addedNodes) {
+              if (n.nodeType === 1) added.push(n);
+            }
+          }
+          if (added.length === 0) return;
+          if (domHideContainsTextDebounce[mod.id]) clearTimeout(domHideContainsTextDebounce[mod.id]);
+          domHideContainsTextDebounce[mod.id] = setTimeout(() => {
+            delete domHideContainsTextDebounce[mod.id];
+            for (const el of added) {
+              runDomHideContainsTextInSubtree(mod, el);
+            }
+          }, 150);
+        });
+        observer.observe(root, { childList: true, subtree: true });
+        domHideContainsTextObservers[mod.id] = observer;
+      }
     }
   }
 
@@ -331,21 +415,347 @@
     }
   }
 
+  function countMinimalTextMatches(text, containerSelector, hideAncestorLevel) {
+    const search = (text || '').trim().toLowerCase();
+    if (!search) return 0;
+    const root = containerSelector ? document.querySelector(containerSelector) : document.body;
+    if (!root) return 0;
+    const level = typeof hideAncestorLevel === 'number' ? hideAncestorLevel : 0;
+    let count = 0;
+    function walk(el) {
+      if (el.nodeType !== 1) return;
+      const raw = el.textContent || '';
+      if (!raw.toLowerCase().includes(search)) {
+        for (let i = 0; i < el.children.length; i++) walk(el.children[i]);
+        return;
+      }
+      for (let i = 0; i < el.children.length; i++) {
+        const c = el.children[i];
+        if (c.nodeType === 1 && (c.textContent || '').toLowerCase().includes(search)) {
+          for (let j = 0; j < el.children.length; j++) walk(el.children[j]);
+          return;
+        }
+      }
+      count++;
+      for (let i = 0; i < el.children.length; i++) walk(el.children[i]);
+    }
+    walk(root);
+    return count;
+  }
+
+  function agentToolSimulateModEffect(params) {
+    const type = params?.type;
+    if (type === 'dom-hide') {
+      const selector = params?.selector;
+      if (!selector) return { error: 'selector required for dom-hide' };
+      const count = getSelectorMatchCount(selector);
+      return { count, message: `Would hide ${count} element(s) matching the selector.` };
+    }
+    if (type === 'dom-hide-contains-text') {
+      const p = params?.params || params;
+      const text = p?.text;
+      if (!text || typeof text !== 'string') return { error: 'params.text required for dom-hide-contains-text' };
+      const containerSelector = p?.containerSelector;
+      const hideAncestorLevel = typeof p?.hideAncestorLevel === 'number' ? p.hideAncestorLevel : 0;
+      const minimalMatchCount = countMinimalTextMatches(text, containerSelector, hideAncestorLevel);
+      return {
+        minimalMatchCount,
+        message: minimalMatchCount === 0
+          ? 'No minimal text matches found — the page may have changed or the text is not present.'
+          : `Would hide ${minimalMatchCount} element(s) (ancestors of minimal text matches).`
+      };
+    }
+    return { error: 'type must be dom-hide or dom-hide-contains-text' };
+  }
+
+  function getSelector(el) {
+    if (!el || !el.tagName) return null;
+    if (el.id && /^[a-zA-Z][\w-]*$/.test(el.id)) return '#' + el.id;
+    const tag = el.tagName.toLowerCase();
+    if (el.className && typeof el.className === 'string') {
+      const classes = el.className.trim().split(/\s+/).filter(c => /^[a-zA-Z][\w-]*$/.test(c)).slice(0, 2);
+      if (classes.length) return tag + '.' + classes.join('.');
+    }
+    return tag;
+  }
+
   function extractPageContext() {
+    const landmarks = [];
+    const addLandmark = (selector, name) => {
+      const el = document.querySelector(selector);
+      if (el) {
+        const sel = getSelector(el);
+        if (sel) landmarks.push({ name, selector: sel });
+      }
+    };
+    addLandmark('header, [role="banner"]', 'header');
+    addLandmark('main, [role="main"], #main, .main, #content, .content', 'main');
+    addLandmark('nav, [role="navigation"]', 'nav');
+    addLandmark('footer, [role="contentinfo"]', 'footer');
+    addLandmark('aside, [role="complementary"]', 'aside');
+
+    const structure = [];
+    const body = document.body;
+    if (body) {
+      const children = Array.from(body.children).slice(0, 8);
+      for (const child of children) {
+        const sel = getSelector(child);
+        if (sel) structure.push(sel);
+      }
+    }
+
+    const headings = Array.from(document.querySelectorAll('h1, h2, h3')).slice(0, 12).map(h => ({
+      level: h.tagName,
+      text: h.textContent.trim().substring(0, 80),
+      selector: getSelector(h)
+    }));
+
     return {
       url: window.location.href,
       hostname: window.location.hostname,
       title: document.title,
-      headings: Array.from(document.querySelectorAll('h1, h2, h3')).slice(0, 10).map(h => ({
-        level: h.tagName,
-        text: h.textContent.trim().substring(0, 80)
-      })),
+      headings,
       forms: document.querySelectorAll('form').length,
       buttons: document.querySelectorAll('button, [role="button"]').length,
       inputs: document.querySelectorAll('input, textarea, select').length,
       modals: document.querySelectorAll('[role="dialog"], [class*="modal"], [class*="popup"], [class*="overlay"]').length,
       banners: document.querySelectorAll('[class*="banner"], [class*="cookie"], [class*="consent"], [class*="notification"]').length,
+      landmarks,
+      structure,
     };
+  }
+
+  // =========================================
+  // Agent tools (for truly agentic loop)
+  // =========================================
+
+  function agentToolGetPageSummary() {
+    const metaDesc = document.querySelector('meta[name="description"]');
+    const ogTitle = document.querySelector('meta[property="og:title"]');
+    const ogType = document.querySelector('meta[property="og:type"]');
+    const h1 = document.querySelector('h1');
+    const lang = document.documentElement.lang || null;
+    const viewport = document.querySelector('meta[name="viewport"]');
+    const purposeParts = [document.title];
+    if (h1) purposeParts.push(h1.textContent.trim());
+    if (metaDesc && metaDesc.getAttribute('content')) purposeParts.push(metaDesc.getAttribute('content'));
+    const purpose = purposeParts.join(' ').substring(0, 200);
+    return {
+      title: document.title,
+      url: window.location.href,
+      description: metaDesc ? metaDesc.getAttribute('content') : null,
+      ogTitle: ogTitle ? ogTitle.getAttribute('content') : null,
+      ogType: ogType ? ogType.getAttribute('content') : null,
+      h1: h1 ? h1.textContent.trim().substring(0, 120) : null,
+      lang,
+      viewport: viewport ? viewport.getAttribute('content') : null,
+      purpose,
+    };
+  }
+
+  function agentToolGetStructure(selector) {
+    const root = selector ? document.querySelector(selector) : document.body;
+    if (!root) return { error: 'Selector did not match any element' };
+    const MAX_DEPTH = 4;
+    const MAX_CHILDREN = 12;
+    function outline(el, depth) {
+      if (depth > MAX_DEPTH) return null;
+      const sel = getSelector(el);
+      const tag = el.tagName.toLowerCase();
+      const role = el.getAttribute('role');
+      const label = [sel || tag, role ? `role=${role}` : ''].filter(Boolean).join(' ');
+      const children = Array.from(el.children).slice(0, MAX_CHILDREN).map(c => outline(c, depth + 1)).filter(Boolean);
+      return { tag, selector: sel, role, label, children: children.length ? children : undefined };
+    }
+    return { structure: outline(root, 0) };
+  }
+
+  function agentToolSearchComponents(query) {
+    if (!query || typeof query !== 'string') return { error: 'query required' };
+    const q = query.trim().toLowerCase();
+    const results = [];
+    const MAX = 20;
+    try {
+      const nodes = document.querySelectorAll(query);
+      if (nodes.length > 0) {
+        const len = Math.min(nodes.length, MAX);
+        for (let i = 0; i < len; i++) {
+          const el = nodes[i];
+          results.push({
+            selector: getSelector(el),
+            tag: el.tagName.toLowerCase(),
+            role: el.getAttribute('role'),
+            text: el.textContent.trim().substring(0, 60),
+            matchCount: nodes.length,
+          });
+        }
+        return { bySelector: true, matchCount: nodes.length, results };
+      }
+    } catch (_) {}
+    const all = document.querySelectorAll('body *');
+    for (const el of all) {
+      if (results.length >= MAX) break;
+      const text = el.textContent.trim();
+      const role = (el.getAttribute('role') || '').toLowerCase();
+      const cls = (el.className && typeof el.className === 'string' ? el.className : '').toLowerCase();
+      if (text.includes(q) || role.includes(q) || cls.includes(q)) {
+        results.push({
+          selector: getSelector(el),
+          tag: el.tagName.toLowerCase(),
+          role: el.getAttribute('role'),
+          text: text.substring(0, 80),
+        });
+      }
+    }
+    return { bySelector: false, results };
+  }
+
+  function agentToolDetectFramework() {
+    const hints = [];
+    if (typeof window.__REACT_DEVTOOLS_GLOBAL_HOOK__ !== 'undefined' || (window.React && window.React.createElement)) hints.push('React');
+    if (window.__VUE__ || (window.Vue && window.Vue.version)) hints.push('Vue');
+    if (window.ng || (window.getAngularVersion && typeof window.getAngularVersion === 'function')) hints.push('Angular');
+    if (window.__NEXT_DATA__ || document.getElementById('__NEXT_DATA__')) hints.push('Next.js');
+    if (document.querySelector('[data-svelte-hydratable]') || window.__svelte) hints.push('Svelte');
+    const scripts = Array.from(document.querySelectorAll('script[src]'));
+    for (const s of scripts) {
+      const src = (s.getAttribute('src') || '').toLowerCase();
+      if (src.includes('react') && !hints.includes('React')) hints.push('React (from script)');
+      if (src.includes('vue') && !hints.includes('Vue')) hints.push('Vue (from script)');
+      if (src.includes('angular') && !hints.includes('Angular')) hints.push('Angular (from script)');
+      if (src.includes('next') && !hints.includes('Next.js')) hints.push('Next.js (from script)');
+    }
+    const root = document.body ? document.body.firstElementChild : null;
+    const rootId = root && root.id ? root.id : null;
+    if (rootId === '__next') hints.push('Next.js (root id)');
+    if (rootId === 'root' || rootId === 'app') hints.push('Common SPA root');
+    return { frameworks: hints.length ? hints : ['Unknown'], rootId };
+  }
+
+  function agentToolGetComponentSummary() {
+    const sections = [];
+    const landmarks = [
+      { name: 'header', el: document.querySelector('header, [role="banner"]') },
+      { name: 'main', el: document.querySelector('main, [role="main"], #main, .main') },
+      { name: 'nav', el: document.querySelector('nav, [role="navigation"]') },
+      { name: 'footer', el: document.querySelector('footer, [role="contentinfo"]') },
+      { name: 'aside', el: document.querySelector('aside, [role="complementary"]') },
+    ];
+    for (const { name, el } of landmarks) {
+      if (el) {
+        const sel = getSelector(el);
+        const h = el.querySelector('h1, h2, h3');
+        sections.push({
+          name,
+          selector: sel,
+          heading: h ? h.textContent.trim().substring(0, 50) : null,
+          childCount: el.children.length,
+        });
+      }
+    }
+    const regions = document.querySelectorAll('[role="region"], section');
+    for (let i = 0; i < Math.min(regions.length, 8); i++) {
+      const el = regions[i];
+      const ariaLabel = el.getAttribute('aria-label');
+      const h = el.querySelector('h1, h2, h3, h4');
+      sections.push({
+        name: ariaLabel || (h ? h.textContent.trim().substring(0, 30) : 'region'),
+        selector: getSelector(el),
+        childCount: el.children.length,
+      });
+    }
+    return { sections };
+  }
+
+  function agentToolGetElementInfo(selector) {
+    if (!selector) return { error: 'selector required' };
+    const el = document.querySelector(selector);
+    if (!el) return { error: 'No element matched selector' };
+    let display, visibility;
+    try {
+      const cs = window.getComputedStyle(el);
+      display = cs.display;
+      visibility = cs.visibility;
+    } catch (_) {}
+    const text = el.textContent.trim().substring(0, 150);
+    return {
+      tag: el.tagName.toLowerCase(),
+      id: el.id || null,
+      classes: (el.className && typeof el.className === 'string' ? el.className.trim().split(/\s+/).slice(0, 10) : []),
+      role: el.getAttribute('role'),
+      display,
+      visibility,
+      childCount: el.children.length,
+      textSnippet: text,
+      selector: getSelector(el),
+    };
+  }
+
+  function agentToolFindElementsContainingText(text, containerSelector) {
+    if (!text || typeof text !== 'string') return { error: 'text required' };
+    const search = text.trim().toLowerCase();
+    if (!search) return { error: 'text required' };
+    const root = containerSelector ? document.querySelector(containerSelector) : document.body;
+    if (!root) return { error: containerSelector ? 'Container selector did not match' : 'No body' };
+    const MAX = 30;
+    const results = [];
+    function walk(el) {
+      if (results.length >= MAX) return;
+      if (el.nodeType !== 1) return;
+      const raw = el.textContent || '';
+      if (!raw.toLowerCase().includes(search)) {
+        for (const child of el.children) walk(child);
+        return;
+      }
+      for (const child of el.children) {
+        if (child.nodeType === 1 && (child.textContent || '').toLowerCase().includes(search)) {
+          for (const c of el.children) walk(c);
+          return;
+        }
+      }
+      const sel = getSelector(el);
+      let ancestor = el;
+      let level = 0;
+      const ancestors = [];
+      while (ancestor && ancestor !== root) {
+        ancestors.push({ level, selector: getSelector(ancestor), tag: ancestor.tagName.toLowerCase() });
+        ancestor = ancestor.parentElement;
+        level++;
+      }
+      results.push({
+        selector: sel,
+        tag: el.tagName.toLowerCase(),
+        textSnippet: raw.trim().substring(0, 80),
+        ancestorLevels: ancestors.slice(0, 6),
+        suggestedHideAncestorLevel: Math.min(2, Math.max(0, level - 1)),
+      });
+      for (const child of el.children) walk(child);
+    }
+    walk(root);
+    return { matchCount: results.length, results };
+  }
+
+  function runAgentTool(tool, params) {
+    switch (tool) {
+      case 'get_page_summary':
+        return agentToolGetPageSummary();
+      case 'get_structure':
+        return agentToolGetStructure(params?.selector);
+      case 'search_components':
+        return agentToolSearchComponents(params?.query);
+      case 'detect_framework':
+        return agentToolDetectFramework();
+      case 'get_component_summary':
+        return agentToolGetComponentSummary();
+      case 'get_element_info':
+        return agentToolGetElementInfo(params?.selector);
+      case 'find_elements_containing_text':
+        return agentToolFindElementsContainingText(params?.text, params?.containerSelector);
+      case 'simulate_mod_effect':
+        return agentToolSimulateModEffect(params);
+      default:
+        return { error: 'Unknown tool: ' + tool };
+    }
   }
 
   // =========================================
@@ -368,6 +778,16 @@
 
       case 'GET_PAGE_CONTEXT':
         sendResponse({ data: extractPageContext() });
+        break;
+
+      case 'AGENT_TOOL':
+        try {
+          const result = runAgentTool(msg.tool, msg.params || {});
+          sendResponse({ ok: true, result });
+        } catch (e) {
+          logError('AGENT_TOOL failed', msg.tool, e.message);
+          sendResponse({ ok: false, error: e.message });
+        }
         break;
 
       case 'REFRESH_MODS_STATE':
@@ -412,16 +832,22 @@
         }
         break;
 
-      case 'REMOVE_MOD':
+      case 'REMOVE_MOD': {
+        const hadTextMod = !!domHideContainsTextObservers[msg.modId];
+        if (hadTextMod) {
+          removeDomHideContainsText(msg.modId);
+          log('Removed dom-hide-contains-text mod', { modId: msg.modId });
+        }
         const styleEl = document.querySelector(`style[data-mod-id="${msg.modId}"]`);
         if (styleEl) {
           styleEl.remove();
           log('Removed mod style from DOM', { modId: msg.modId });
-        } else {
+        } else if (!hadTextMod) {
           log('REMOVE_MOD: no style found for id', msg.modId);
         }
         sendResponse({ ok: true });
         break;
+      }
 
       case 'PING':
         sendResponse({ ok: true });

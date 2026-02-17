@@ -31,6 +31,9 @@ async function getDistinctId() {
 }
 
 async function posthogCapture(event, properties = {}) {
+  if (!POSTHOG_API_KEY || typeof POSTHOG_API_KEY !== 'string' || !POSTHOG_API_KEY.trim()) {
+    return;
+  }
   try {
     const { distinctId } = await getDistinctId();
     const payload = {
@@ -119,6 +122,40 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 });
 
 // =========================================
+// DevTools panel (page-context tools when DevTools is open)
+// =========================================
+
+const devtoolsPortByTabId = {};
+const devtoolsPendingRequests = {};
+const devtoolsSelectedElementCallbacks = {};
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'mod-devtools') return;
+  let tabIdForPort = null;
+  port.onMessage.addListener((msg) => {
+    if (msg.type === 'DEVTOOLS_PANEL_READY' && typeof msg.tabId === 'number') {
+      tabIdForPort = msg.tabId;
+      devtoolsPortByTabId[msg.tabId] = port;
+      log('DevTools panel ready for tab', msg.tabId);
+    } else if (msg.type === 'DEVTOOLS_PANEL_UNLOAD' && typeof msg.tabId === 'number') {
+      delete devtoolsPortByTabId[msg.tabId];
+      tabIdForPort = null;
+    } else if (msg.type === 'AGENT_TOOL_RESULT' && msg.requestId) {
+      const cb = devtoolsPendingRequests[msg.requestId];
+      delete devtoolsPendingRequests[msg.requestId];
+      if (cb) cb({ ok: true, result: msg.result });
+    } else if (msg.type === 'SELECTED_ELEMENT_RESULT' && msg.requestId) {
+      const cb = devtoolsSelectedElementCallbacks[msg.requestId];
+      delete devtoolsSelectedElementCallbacks[msg.requestId];
+      if (cb) cb({ ok: true, selectedElement: msg.result });
+    }
+  });
+  port.onDisconnect.addListener(() => {
+    if (tabIdForPort != null) delete devtoolsPortByTabId[tabIdForPort];
+  });
+});
+
+// =========================================
 // Message routing
 // =========================================
 
@@ -130,13 +167,54 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       });
       return true;
 
-    case 'SEND_TO_CONTENT':
-      sendToContentScript(msg.tabId, msg.payload).then(response => {
+    case 'GET_DEVTOOLS_SELECTED_ELEMENT': {
+      const tabId = msg.tabId;
+      const port = devtoolsPortByTabId[tabId];
+      if (!port) {
+        sendResponse({ ok: true, selectedElement: null });
+        return false;
+      }
+      const requestId = generateId();
+      devtoolsSelectedElementCallbacks[requestId] = (resp) => {
+        sendResponse({ ok: true, selectedElement: resp.selectedElement ?? null });
+      };
+      port.postMessage({ type: 'GET_SELECTED_ELEMENT', requestId });
+      return true;
+    }
+
+    case 'SEND_TO_CONTENT': {
+      const payload = msg.payload;
+      const devtoolsPort = devtoolsPortByTabId[msg.tabId];
+      const isAgentTool = payload && payload.type === 'AGENT_TOOL';
+      const tool = isAgentTool ? payload.tool : null;
+      const delegateToDevTools = devtoolsPort && isAgentTool && tool === 'find_elements_containing_text';
+      if (delegateToDevTools) {
+        const requestId = generateId();
+        const timeout = setTimeout(() => {
+          const cb = devtoolsPendingRequests[requestId];
+          delete devtoolsPendingRequests[requestId];
+          if (cb) sendToContentScript(msg.tabId, payload).then((r) => cb(r)).catch((e) => cb({ ok: false, error: e.message }));
+        }, 8000);
+        devtoolsPendingRequests[requestId] = (response) => {
+          clearTimeout(timeout);
+          delete devtoolsPendingRequests[requestId];
+          sendResponse(response);
+        };
+        devtoolsPort.postMessage({
+          type: 'RUN_AGENT_TOOL_IN_PAGE',
+          requestId,
+          tool,
+          params: payload.params || {}
+        });
+        return true;
+      }
+      sendToContentScript(msg.tabId, payload).then(response => {
         sendResponse(response);
       }).catch(e => {
         sendResponse({ ok: false, error: e.message });
       });
       return true;
+    }
 
     case 'CALL_AI':
       callClaudeAPI(msg.messages, msg.systemPrompt, msg.apiKey, msg.traceId).then(response => {
@@ -146,20 +224,32 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       });
       return true;
 
-    case 'SAVE_MOD':
-      saveMod(canonicalHostname(msg.hostname), msg.mod).then((mod) => {
-        posthogCapture('mod_saved', {
-          hostname: canonicalHostname(msg.hostname),
-          mod_type: mod.type,
-          mod_description: mod.description
+    case 'SAVE_MOD': {
+      const hostname = canonicalHostname(msg.hostname);
+      const key = `mods:${hostname}`;
+      chrome.storage.local.get(key).then((result) => {
+        const mods = result[key] || [];
+        const isUpdate = msg.mod.id && mods.some(m => m.id === msg.mod.id);
+        const saveFn = isUpdate ? updateMod(hostname, msg.mod) : saveMod(hostname, msg.mod);
+        return saveFn.then((mod) => {
+          posthogCapture('mod_saved', {
+            hostname,
+            mod_type: mod.type,
+            mod_description: mod.description,
+            is_update: isUpdate
+          });
+          updateBadgeForActiveTab();
+          sendResponse({ ok: true });
+        }).catch((e) => {
+          log('SAVE_MOD failed', e);
+          sendResponse({ ok: false, error: e.message });
         });
-        updateBadgeForActiveTab();
-        sendResponse({ ok: true });
       }).catch(e => {
         log('SAVE_MOD failed', e);
         sendResponse({ ok: false, error: e.message });
       });
       return true;
+    }
 
     case 'GET_MODS': {
       const key = `mods:${canonicalHostname(msg.hostname)}`;
@@ -187,6 +277,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         });
         updateBadgeForActiveTab();
         sendResponse({ ok: true });
+      });
+      return true;
+
+    case 'REVERT_MOD':
+      revertMod(canonicalHostname(msg.hostname), msg.modId).then((result) => {
+        if (result.ok) {
+          updateBadgeForActiveTab();
+          posthogCapture('mod_reverted', { hostname: canonicalHostname(msg.hostname), modId: msg.modId });
+        }
+        sendResponse(result);
+      }).catch((e) => {
+        sendResponse({ ok: false, error: e.message });
       });
       return true;
 
@@ -347,14 +449,97 @@ async function callClaudeAPI(messages, systemPrompt, apiKey, traceId) {
 // Storage management
 // =========================================
 
+async function updateMod(hostname, mod) {
+  const key = `mods:${hostname}`;
+  const result = await chrome.storage.local.get(key);
+  const mods = result[key] || [];
+  const idx = mods.findIndex(m => m.id === mod.id);
+  if (idx === -1) {
+    return saveMod(hostname, mod);
+  }
+  const existing = mods[idx];
+  const now = new Date().toISOString();
+  const revisions = Array.isArray(existing.revisions) ? existing.revisions.slice(-9) : [];
+  revisions.push({
+    at: now,
+    label: 'Refined',
+    snapshot: {
+      description: existing.description,
+      type: existing.type,
+      selector: existing.selector,
+      code: existing.code,
+      params: existing.params,
+      enabled: existing.enabled
+    }
+  });
+  const updated = {
+    ...mod,
+    id: existing.id,
+    createdAt: existing.createdAt,
+    updatedAt: now,
+    enabled: mod.enabled !== undefined ? mod.enabled : existing.enabled,
+    revisions
+  };
+  mods[idx] = updated;
+  await chrome.storage.local.set({ [key]: mods });
+  log('Updated mod', { hostname, key, modId: updated.id, type: updated.type, description: updated.description });
+  return updated;
+}
+
+async function revertMod(hostname, modId) {
+  const key = `mods:${hostname}`;
+  const result = await chrome.storage.local.get(key);
+  const mods = result[key] || [];
+  const idx = mods.findIndex(m => m.id === modId);
+  if (idx === -1) {
+    return { ok: false, error: 'Mod not found' };
+  }
+  const existing = mods[idx];
+  const revisions = Array.isArray(existing.revisions) ? existing.revisions : [];
+  const lastWithSnapshot = revisions.filter(r => r.snapshot).pop();
+  if (!lastWithSnapshot || !lastWithSnapshot.snapshot) {
+    return { ok: false, error: 'No previous version to revert to. (Only refinements made after this update can be reverted.)' };
+  }
+  const now = new Date().toISOString();
+  const snapshot = lastWithSnapshot.snapshot;
+  const reverted = {
+    id: existing.id,
+    createdAt: existing.createdAt,
+    updatedAt: now,
+    enabled: snapshot.enabled !== undefined ? snapshot.enabled : existing.enabled,
+    description: snapshot.description,
+    type: snapshot.type,
+    selector: snapshot.selector,
+    code: snapshot.code,
+    params: snapshot.params,
+    revisions: revisions.concat([{
+      at: now,
+      label: 'Reverted',
+      snapshot: {
+        description: existing.description,
+        type: existing.type,
+        selector: existing.selector,
+        code: existing.code,
+        params: existing.params,
+        enabled: existing.enabled
+      }
+    }]).slice(-10)
+  };
+  mods[idx] = reverted;
+  await chrome.storage.local.set({ [key]: mods });
+  log('Reverted mod', { hostname, key, modId: reverted.id });
+  return { ok: true, mod: reverted };
+}
+
 async function saveMod(hostname, mod) {
   const key = `mods:${hostname}`;
   const result = await chrome.storage.local.get(key);
   const mods = result[key] || [];
 
   mod.id = mod.id || `mod_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
-  mod.enabled = true;
-  mod.createdAt = new Date().toISOString();
+  mod.enabled = mod.enabled !== undefined ? mod.enabled : true;
+  mod.createdAt = mod.createdAt || new Date().toISOString();
+  mod.revisions = mod.revisions && mod.revisions.length ? mod.revisions : [{ at: mod.createdAt, label: 'Created' }];
 
   mods.push(mod);
   await chrome.storage.local.set({ [key]: mods });
