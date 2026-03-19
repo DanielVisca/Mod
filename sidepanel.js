@@ -3,16 +3,17 @@
 
   const SYSTEM_PROMPT = `You are Mod, a truly agentic AI that helps users modify web pages. You run inside a Chrome extension. You have TOOLS to inspect the current page; use them when you need to understand where you are, how the page is built, or what to change before outputting a modification.
 
-You will receive three context blocks in each user message: <intent> (what the user wants: goal, message, feedback), <world_state> (page context, existing mods, last applied mod, devtools element), and <progress_toward_goal> (steps taken this turn, last proposal, verify result, retry count). Use progress to stay aligned with the intent and to avoid repeating failed approaches.
+You will receive three context blocks in each user message: <intent> (what the user wants: goal, message, feedback), <world_state> (active_site, page context, existing mods, last applied mod, devtools element, optional cached_site_context), and <progress_toward_goal> (steps taken this turn, last proposal, verify result, retry count). Use progress to stay aligned with the intent and to avoid repeating failed approaches. When <cached_site_context> is present, you can rely on it and call inspect_section(sectionId) or find_elements directly for follow-up changes without re-running get_page_overview.
 
 Your outputs are: (1) a request to run TOOLS (see below), (2) a single modification in JSON format, (3) a request for the user to select an element, or (4) a short clarification.
 
 <tools>
 You can request tool runs by outputting a \`\`\`tools block with a JSON object that has a "calls" array. Each call has "name" (required), optional "params" (object), and optional "reason" (one sentence: why you are calling this tool — including reason improves accuracy). You may request multiple tools in one block. After the tools run, you will receive the results and can respond again (up to 2 rounds of tool use per user message). Then output your modification. You may output a brief sentence before your \`\`\`tools block explaining your next step; this will be shown to the user.
 
-Available tools (use these; legacy names still work):
-- get_page_overview: Params: optional "reason". Returns title, URL, meta, viewport, purpose, sections/landmarks, and detected framework. Use first to understand the page.
-- find_elements: Params: one of "text" (substring; returns minimal nodes + ancestorLevels), "selector" (CSS), or "query" (search by text/role/class). Optional "containerSelector" for text. Optional "reason". Use to find "cookie banner", "Sponsored", or elements by selector.
+Available tools (use these; legacy names still work). You may call get_page_overview, find_elements, get_site_knowledge, check_selector in parallel when appropriate; no required order.
+- get_page_overview: Params: optional "reason". Returns title, url, hostname, framework, sectionIds, and sections (id, name, selector, childCount). Use first to understand the page; then use inspect_section(sectionId) to drill into a section instead of dumping full structure.
+- inspect_section: Params: "sectionId" (from get_page_overview sectionIds). Returns DOM structure outline for that section only. Use after get_page_overview to explore areas of interest.
+- find_elements: Params: one of "text" (substring; returns minimal nodes + ancestorLevels), "selector" (CSS), or "query" (search by text/role/class). Optional "containerSelector" for text. Optional "reason". Use to find "cookie banner", "Sponsored", or elements by selector. When no matches, response includes suggestion and similar_text_found for self-correction (e.g. typo).
 - inspect_element: Params: "selector", optional "reason". Returns deep read of one element: tag, id, classes, role, display, visibility, childCount, textSnippet, and DOM structure around it. Use before modifying a specific element.
 - check_selector: Params: "type" ("dom-hide" | "dom-hide-contains-text"), "selector" (for dom-hide), "params" (for dom-hide-contains-text: text, containerSelector, hideAncestorLevel), optional "reason". Returns match count and visible count **without** applying. Use before propose_mod to confirm scope.
 - propose_mod: Params: "description", "type" ("css" | "dom-hide" | "dom-hide-contains-text"), optional "selector", optional "code", optional "params" (for dom-hide-contains-text), optional "id", optional "reason". Submits the mod. You may also output a \`\`\`json mod block in chat.
@@ -37,6 +38,7 @@ Example tool block (use when you need more context before producing a mod):
 <making_changes>
 - After using tools (or when context is enough), output exactly one modification in the JSON format below.
 - To avoid breaking the page: (1) PREFER selectors scoped to landmarks or structure; (2) AVOID "body", "html", or bare "div"/"p"; (3) For hiding, use the most specific selector; (4) One logical change per mod.
+- dom-hide-contains-text applies to the page immediately and also to dynamically loaded content: the extension watches for new nodes and hides matching items as they appear, so the user does not need to refresh.
 - You may use types "css", "dom-hide", or "dom-hide-contains-text". All CSS must use !important. For dom-hide, the extension applies display: none !important.
 - Many production sites (e.g. Instagram, Facebook) serve minified or obfuscated JavaScript: short or hashed class names, renamed functions. You cannot read or beautify their source from Mod. Rely on the live DOM (get_structure, find_elements_containing_text), detect_framework, and minimal text matches. Prefer text-based hiding (dom-hide-contains-text) and containerSelector over fragile class-based selectors.
 - For dynamic feeds (Instagram, Twitter, etc.) where class names are hashed or change often, a plain CSS selector is often unstable. Use find_elements_containing_text to find minimal nodes (e.g. "Sponsored" or "Ad" labels), then prefer dom-hide-contains-text with hideAncestorLevel from the tool's ancestorLevels (e.g. level to the post/card). Avoid broad words that appear in many places (e.g. "Follow" on Instagram appears in nav, captions, and buttons); prefer more specific text (e.g. "Suggested for you", "Sponsored") or confirm with the tool that you are matching minimal nodes only. Do not use dom-hide with a guessed selector when the reliable signal is text.
@@ -47,7 +49,7 @@ Example tool block (use when you need more context before producing a mod):
 - When the task benefits from understanding the page (e.g. "redesign the header", "hide the cookie popup"), call relevant tools first (get_page_overview, find_elements, inspect_element), then output the mod.
 - When the user's request is clearly a refinement and [LAST APPLIED MOD] or [EXISTING MODS] is provided, UPDATE that mod: include "id" set to that mod's id.
 - Ask the user to select an element only when the target is ambiguous. Otherwise use tools and context to produce the mod.
-- One modification per turn. After outputting a mod (especially for dynamic feeds or when the user said something wasn't working), **ask the user to verify** (e.g. "Apply this and tell me if the feed looks right" or "Does this fix it?"). If they say it's still wrong (e.g. "that's hiding everything" or "now nothing is hidden"), **re-investigate**: run find_elements_containing_text (and optionally get_component_summary, detect_framework) again, reason about what went wrong, then output an updated mod.
+- One modification per turn. After outputting a mod (especially for dynamic feeds or when the user said something wasn't working), **ask the user to verify** (e.g. "Apply this and tell me if the feed looks right" or "Does this fix it?"). If they say it's still wrong (e.g. "that's hiding everything" or "now nothing is hidden"), **re-investigate**: run find_elements (with text) again, reason about what went wrong, then output an updated mod.
 - When the user reports that a mod **hid too much** or **didn't hide the right things**, **always** run find_elements (with "text") again (with the same or more specific text) and use the minimal matches and ancestorLevels to choose hideAncestorLevel. Do not guess; use the tool output.
 - For complex or site-specific requests, output a **short numbered plan** (1. … 2. … 3. …) before the mod, then the mod, then what to check. Example: "1. get_page_overview and get_site_knowledge. 2. find_elements with text 'Sponsored'. 3. propose_mod dom-hide-contains-text with hideAncestorLevel from results. 4. verify runs automatically." Then output the mod and what to verify.
 - When the user's request is complex or site-specific (e.g. "hide posts from people I don't follow on Instagram"), **state your plan in one short sentence** before the mod (e.g. "I'll find minimal Follow buttons and hide their article") and, after the mod, **what to check** (e.g. "Apply and confirm the feed still shows your follows").
@@ -115,6 +117,7 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
   let refinementTargetMod = null;
   let previewingSingleModId = null;
   let conversationGoal = null;
+  const siteContextCacheByHost = {};
 
   function canonicalHostname(hostname) {
     if (!hostname || typeof hostname !== 'string') return hostname;
@@ -181,10 +184,13 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
       devtoolsElement: devtoolsEl,
       conversationGoal: goal,
       userFeedback: feedback,
-      progressState: progress
+      progressState: progress,
+      activeHostname: activeHostnameOpt
     } = opts || {};
 
     const esc = (s) => (s == null || s === '') ? '' : String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const activeHostname = activeHostnameOpt != null ? activeHostnameOpt : (d && d.hostname ? d.hostname : null);
+    const cachedSiteContext = opts && opts.cachedSiteContext;
 
     let intent = '<intent>\n';
     if (goal) intent += `  <conversation_goal>${esc(goal)}</conversation_goal>\n`;
@@ -202,6 +208,10 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
     intent += '</intent>\n\n';
 
     let world = '<world_state>\n';
+    world += '  <active_site>';
+    if (activeHostname) world += esc(activeHostname) + '. All context (mods, site knowledge, page) refers to this tab only.';
+    else world += 'No active site (Chrome internal page or unloaded).';
+    world += '</active_site>\n';
     if (elCtx) {
       world += '  <user_selected_element>\n';
       world += `    <selector>${esc(elCtx.selector)}</selector>\n`;
@@ -233,6 +243,12 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
     if (mods?.length) world += `  <existing_mods>${mods.map(m => `${m.id}: ${m.description} (${m.type})`).join('; ')}</existing_mods>\n`;
     if (lastMod) world += `  <last_applied_mod id="${esc(lastMod.id)}" description="${esc(lastMod.description)}" type="${esc(lastMod.type)}">Include "id": "${esc(lastMod.id)}" to update instead of create.</last_applied_mod>\n`;
     if (devtoolsEl) world += `  <devtools_element tagName="${esc(devtoolsEl.tagName)}" textContent="${esc((devtoolsEl.textContent || '').replace(/\n/g, ' ').slice(0, 100))}" selector="${esc(devtoolsEl.selector || '')}"/>\n`;
+    if (cachedSiteContext && (cachedSiteContext.framework || (cachedSiteContext.sectionIds && cachedSiteContext.sectionIds.length))) {
+      world += '  <cached_site_context';
+      if (cachedSiteContext.framework) world += ` framework="${esc(cachedSiteContext.framework)}"`;
+      if (cachedSiteContext.sectionIds && cachedSiteContext.sectionIds.length) world += ` sectionIds="${esc(cachedSiteContext.sectionIds.join(','))}"`;
+      world += '/> You can use inspect_section(sectionId) without re-running get_page_overview.\n';
+    }
     world += '</world_state>\n\n';
 
     let prog = '<progress_toward_goal>\n';
@@ -1079,7 +1095,9 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
       conversationGoal,
       userFeedback: indicatesModFailure ? 'Previous mod did not work as intended. Re-run tools to investigate and suggest a refined mod.' : null,
       progressState,
-      siteKnowledge
+      siteKnowledge,
+      activeHostname: currentHostname,
+      cachedSiteContext: currentHostname ? siteContextCacheByHost[canonicalHostname(currentHostname)] : null
     });
     if (selectedElementContext) selectedElementContext = null;
     conversationHistory.push({ role: 'user', content: fullMessage });
@@ -1213,44 +1231,53 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
         continue;
       }
 
-      break;
-    }
-
-    const jsonMatch = lastAiText.match(/```json\s*\n([\s\S]*?)\n```/);
-    if (jsonMatch) {
-      try {
-        const mod = JSON.parse(jsonMatch[1]);
-        if (mod.type === 'js-safe') {
-          addMessage('assistant', 'This version of Mod supports only CSS and "hide element" mods. I can\'t run JavaScript mods here. Try asking to hide an element or change styles with CSS.');
-          return;
-        }
-
-        const beforeJson = stripHiddenBlocks(lastAiText.substring(0, lastAiText.indexOf('```json')));
-        if (beforeJson) {
-          addMessage('assistant', beforeJson);
-        }
-
-        if (mod.type === 'dom-hide-contains-text' && !toolsRunThisTurn.includes('find_elements_containing_text') && !toolsRunThisTurn.includes('find_elements')) {
-          addSystemMessage('Run find_elements (with text) first so we can target the right nodes.');
-          return;
-        }
-
-        if (!modAddedViaProposeThisTurn) {
-          const isRefinement = mod.id && lastAppliedMod && mod.id === lastAppliedMod.id;
-          if (isRefinement) {
-            await autoApplyRefinement(mod);
-          } else {
-            addModMessage(mod);
+      const jsonMatch = lastAiText.match(/```json\s*\n([\s\S]*?)\n```/);
+      if (jsonMatch) {
+        try {
+          const mod = JSON.parse(jsonMatch[1]);
+          if (mod.type === 'js-safe') {
+            addMessage('assistant', lastAiText);
+            addSystemMessage('This version of Mod supports only CSS and "hide element" mods. Try asking to hide an element or change styles with CSS.');
+            return;
           }
+
+          if (mod.type === 'dom-hide-contains-text' && !toolsRunThisTurn.includes('find_elements_containing_text') && !toolsRunThisTurn.includes('find_elements')) {
+            addMessage('assistant', lastAiText);
+            addSystemMessage('Run find_elements (with text) first so we can target the right nodes. Asking the agent to run tools and try again.');
+            const textHint = mod.params && mod.params.text ? ` Use text "${mod.params.text}".` : '';
+            conversationHistory.push({
+              role: 'user',
+              content: 'You proposed a dom-hide-contains-text mod but find_elements (with text) was not run this turn. Run find_elements with the text you want to match (e.g. from your mod params), then output your mod again.' + textHint
+            });
+            round++;
+            continue;
+          }
+
+          const beforeJson = stripHiddenBlocks(lastAiText.substring(0, lastAiText.indexOf('```json')));
+          if (beforeJson) {
+            addMessage('assistant', beforeJson);
+          }
+
+          if (!modAddedViaProposeThisTurn) {
+            const isRefinement = mod.id && lastAppliedMod && mod.id === lastAppliedMod.id;
+            if (isRefinement) {
+              await autoApplyRefinement(mod);
+            } else {
+              addModMessage(mod);
+            }
+          }
+          break;
+        } catch (e) {
+          const displayText = stripHiddenBlocks(lastAiText);
+          addMessage('assistant', displayText || lastAiText);
+          addSystemMessage('(Could not parse modification. The AI may need another try.)');
+          break;
         }
-      } catch (e) {
+      } else {
         const displayText = stripHiddenBlocks(lastAiText);
         addMessage('assistant', displayText || lastAiText);
-        addSystemMessage('(Could not parse modification. The AI may need another try.)');
+        break;
       }
-    } else {
-      const displayText = stripHiddenBlocks(lastAiText);
-      addMessage('assistant', displayText || lastAiText);
     }
   }
 
@@ -1268,7 +1295,8 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
         let result;
         if (name === 'get_site_knowledge') {
           const sk = await chrome.runtime.sendMessage({ type: 'GET_SITE_KNOWLEDGE', hostname: currentHostname });
-          result = sk || { error: 'No hostname' };
+          const emptySk = { framework: null, lastDetectedAt: null, successfulSelectors: [], existingMods: [] };
+          result = currentHostname ? (sk || emptySk) : { ...emptySk, error: 'No hostname (no active tab or internal page).' };
         } else if (name === 'get_recent_network_errors') {
           const net = await chrome.runtime.sendMessage({ type: 'GET_RECENT_NETWORK_ERRORS', tabId: currentTabId });
           result = net || { recent: [], message: 'Unknown' };
@@ -1283,7 +1311,11 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
           };
           if (mod.type !== 'dom-hide') mod.selector = mod.selector || undefined;
           if (mod.type !== 'dom-hide-contains-text') mod.params = undefined;
-          result = { mod, message: 'Mod proposed. Use verify_mod to confirm scope, or the user can Apply & Save.' };
+          result = {
+            status: 'ok',
+            mod,
+            message: 'Mod proposed. Use verify_mod to confirm scope, or the user can Apply & Save.'
+          };
           return { index, name, result, proposedMod: mod };
         } else {
           const res = await chrome.runtime.sendMessage({
@@ -1303,8 +1335,21 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
     outcomes.sort((a, b) => a.index - b.index);
     const lines = [];
     let proposedModFromTool = null;
+    const host = canonicalHostname(currentHostname);
     for (const { name, result, proposedMod } of outcomes) {
       if (proposedMod) proposedModFromTool = proposedMod;
+      if (host && result && typeof result === 'object' && !result.error) {
+        if (name === 'get_page_overview' && Array.isArray(result.sectionIds)) {
+          siteContextCacheByHost[host] = {
+            framework: result.framework ?? null,
+            sectionIds: result.sectionIds,
+            lastOverviewAt: Date.now()
+          };
+        } else if (name === 'get_site_knowledge' && result.framework != null) {
+          const cur = siteContextCacheByHost[host] || {};
+          siteContextCacheByHost[host] = { ...cur, framework: result.framework, lastOverviewAt: cur.lastOverviewAt || Date.now() };
+        }
+      }
       lines.push(`[${name}]`);
       lines.push(typeof result === 'string' ? result : JSON.stringify(result, null, 2));
     }
@@ -1615,7 +1660,9 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
         document.getElementById('selecting-indicator').classList.add('hidden');
         break;
       case 'TAB_UPDATED':
-        updateActiveTab();
+        updateActiveTab().then(() => {
+          if (currentHostname) addSystemMessage('Switched to ' + currentHostname + '. Context updated for this tab.');
+        });
         conversationHistory = [];
         break;
     }

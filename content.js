@@ -28,30 +28,37 @@
 
   // =========================================
   // Console monitoring (page errors for agent)
+  // CSP: we inject an external script (page-console-patch.js), not inline code.
+  // If the page CSP blocks it, we set consolePatchStatus = 'failed' and
+  // getConsoleErrors() returns a structured failure so the agent is aware.
   // =========================================
   const CONSOLE_BUFFER_MAX = 20;
   const consoleErrorBuffer = [];
+  let consolePatchStatus = 'pending'; // 'pending' | 'ready' | 'failed'
+  let consolePatchInjectedAttempted = false;
+  const CONSOLE_PATCH_READY_TIMEOUT_MS = 500;
 
   function capturePageConsole() {
-    if (window.__MOD_CONSOLE_PATCH_INJECTED) return;
+    if (consolePatchInjectedAttempted) return;
+    consolePatchInjectedAttempted = true;
+    if (window.__MOD_CONSOLE_PATCH_INJECTED) {
+      consolePatchStatus = 'ready';
+      return;
+    }
     const script = document.createElement('script');
-    script.textContent = [
-      '(function() {',
-      '  var o = window.console;',
-      '  if (!o || o.__MOD_PATCHED) return;',
-      '  var orig = { error: o.error, warn: o.warn };',
-      '  function send(level, args) {',
-      '    try {',
-      '      var str = args.map(function(a) { try { return typeof a === "string" ? a : JSON.stringify(a); } catch(e) { return String(a); } }).join(" ");',
-      '      window.postMessage({ type: "MOD_CONSOLE", level: level, args: str, timestamp: Date.now() }, "*");',
-      '    } catch(e) {}',
-      '  }',
-      '  o.error = function() { orig.error.apply(o, arguments); send("error", Array.prototype.slice.call(arguments)); };',
-      '  o.warn = function() { orig.warn.apply(o, arguments); send("warn", Array.prototype.slice.call(arguments)); };',
-      '  o.__MOD_PATCHED = true;',
-      '  window.__MOD_CONSOLE_PATCH_INJECTED = true;',
-      '})();'
-    ].join('\n');
+    script.src = chrome.runtime.getURL('page-console-patch.js');
+    script.onerror = function() {
+      if (consolePatchStatus === 'pending') consolePatchStatus = 'failed';
+    };
+    const timeoutId = setTimeout(function() {
+      if (consolePatchStatus === 'pending') consolePatchStatus = 'failed';
+    }, CONSOLE_PATCH_READY_TIMEOUT_MS);
+    window.addEventListener('message', function onReady(ev) {
+      if (ev.source !== window || !ev.data || ev.data.type !== 'MOD_CONSOLE_READY') return;
+      if (consolePatchStatus === 'pending') consolePatchStatus = 'ready';
+      clearTimeout(timeoutId);
+      window.removeEventListener('message', onReady);
+    });
     (document.documentElement || document.head).appendChild(script);
     script.remove();
   }
@@ -69,6 +76,17 @@
   capturePageConsole();
 
   function getConsoleErrors() {
+    if (consolePatchStatus === 'failed') {
+      return {
+        unavailable: true,
+        reason: 'csp_or_script_blocked',
+        message: 'Console monitoring is not available on this page (Content Security Policy or page restrictions blocked the monitoring script). You can still suggest and apply mods; console errors from the page will not be visible.',
+        context: {
+          hostname: hostname,
+          url: window.location.href
+        }
+      };
+    }
     return {
       recent: consoleErrorBuffer.slice(-10),
       message: consoleErrorBuffer.length === 0
@@ -539,13 +557,14 @@
 
   function agentToolVerifyMod(params) {
     const mod = params?.mod || params;
-    if (!mod || !mod.type) return { error: 'verify_mod requires a mod object (type, selector or params)' };
+    const emptyShape = { matchCount: 0, visibleCount: 0, message: '' };
+    if (!mod || !mod.type) return { ...emptyShape, error: 'verify_mod requires a mod object (type, selector or params)' };
     const type = mod.type;
     let matchCount = 0;
     let visibleCount = 0;
     if (type === 'dom-hide') {
       const selector = mod.selector;
-      if (!selector) return { error: 'dom-hide mod requires selector' };
+      if (!selector) return { ...emptyShape, error: 'dom-hide mod requires selector' };
       const c = countVisibleSelectorMatches(selector);
       matchCount = c.total;
       visibleCount = c.visible;
@@ -558,7 +577,7 @@
     } else if (type === 'css') {
       return { matchCount: 0, visibleCount: 0, message: 'CSS mods have no selector match count; verify visually.' };
     } else {
-      return { error: 'Unsupported mod type for verify_mod' };
+      return { ...emptyShape, error: 'Unsupported mod type for verify_mod' };
     }
     const tempMod = { ...mod, id: 'verify_temp' };
     applyMod(tempMod);
@@ -649,16 +668,78 @@
   // Agent tools (for truly agentic loop)
   // =========================================
 
+  function getSectionsWithIds() {
+    const sections = [];
+    const landmarks = [
+      { name: 'header', id: 'section_header', el: document.querySelector('header, [role="banner"]') },
+      { name: 'main', id: 'section_main', el: document.querySelector('main, [role="main"], #main, .main') },
+      { name: 'nav', id: 'section_nav', el: document.querySelector('nav, [role="navigation"]') },
+      { name: 'footer', id: 'section_footer', el: document.querySelector('footer, [role="contentinfo"]') },
+      { name: 'aside', id: 'section_aside', el: document.querySelector('aside, [role="complementary"]') },
+    ];
+    for (const { name, id, el } of landmarks) {
+      if (el) {
+        const sel = getSelector(el);
+        const h = el.querySelector('h1, h2, h3');
+        sections.push({
+          id,
+          name,
+          selector: sel,
+          heading: h ? h.textContent.trim().substring(0, 50) : null,
+          childCount: el.children.length,
+        });
+      }
+    }
+    const regions = document.querySelectorAll('[role="region"], section');
+    for (let i = 0; i < Math.min(regions.length, 8); i++) {
+      const el = regions[i];
+      const ariaLabel = el.getAttribute('aria-label');
+      const h = el.querySelector('h1, h2, h3, h4');
+      sections.push({
+        id: 'section_region_' + i,
+        name: ariaLabel || (h ? h.textContent.trim().substring(0, 30) : 'region'),
+        selector: getSelector(el),
+        childCount: el.children.length,
+      });
+    }
+    return sections;
+  }
+
   function agentToolGetPageOverview(params) {
     const summary = agentToolGetPageSummary();
-    const component = agentToolGetComponentSummary();
     const framework = agentToolDetectFramework();
+    const sections = getSectionsWithIds();
     return {
-      ...summary,
-      sections: component.sections,
+      title: summary.title,
+      url: summary.url,
+      hostname: window.location.hostname,
       framework: (framework.frameworks && framework.frameworks[0]) || 'Unknown',
-      rootId: framework.rootId
+      sectionIds: sections.map(s => s.id),
+      sections,
     };
+  }
+
+  function agentToolInspectSection(params) {
+    const sectionId = params?.sectionId;
+    const emptyShape = { sectionId: sectionId || null, structure: null };
+    if (!sectionId || typeof sectionId !== 'string') return { ...emptyShape, error: 'inspect_section requires sectionId' };
+    const sections = getSectionsWithIds();
+    const section = sections.find(s => s.id === sectionId);
+    if (!section) return { ...emptyShape, error: 'Unknown sectionId. Use get_page_overview to see sectionIds.' };
+    const root = document.querySelector(section.selector);
+    if (!root) return { ...emptyShape, error: 'Section selector no longer matches' };
+    const MAX_DEPTH = 4;
+    const MAX_CHILDREN = 12;
+    function outline(el, depth) {
+      if (depth > MAX_DEPTH) return null;
+      const sel = getSelector(el);
+      const tag = el.tagName.toLowerCase();
+      const role = el.getAttribute('role');
+      const label = [sel || tag, role ? `role=${role}` : ''].filter(Boolean).join(' ');
+      const children = Array.from(el.children).slice(0, MAX_CHILDREN).map(c => outline(c, depth + 1)).filter(Boolean);
+      return { tag, selector: sel, role, label, children: children.length ? children : undefined };
+    }
+    return { sectionId, structure: outline(root, 0) };
   }
 
   function agentToolGetPageSummary() {
@@ -687,7 +768,7 @@
 
   function agentToolGetStructure(selector) {
     const root = selector ? document.querySelector(selector) : document.body;
-    if (!root) return { error: 'Selector did not match any element' };
+    if (!root) return { structure: null, error: 'Selector did not match any element' };
     const MAX_DEPTH = 4;
     const MAX_CHILDREN = 12;
     function outline(el, depth) {
@@ -703,7 +784,7 @@
   }
 
   function agentToolSearchComponents(query) {
-    if (!query || typeof query !== 'string') return { error: 'query required' };
+    if (!query || typeof query !== 'string') return { matchCount: 0, results: [], error: 'query required' };
     const q = query.trim().toLowerCase();
     const results = [];
     const MAX = 20;
@@ -718,10 +799,9 @@
             tag: el.tagName.toLowerCase(),
             role: el.getAttribute('role'),
             text: el.textContent.trim().substring(0, 60),
-            matchCount: nodes.length,
           });
         }
-        return { bySelector: true, matchCount: nodes.length, results };
+        return { matchCount: nodes.length, results };
       }
     } catch (_) {}
     const all = document.querySelectorAll('body *');
@@ -739,7 +819,7 @@
         });
       }
     }
-    return { bySelector: false, results };
+    return { matchCount: results.length, results };
   }
 
   function agentToolDetectFramework() {
@@ -800,9 +880,10 @@
   }
 
   function agentToolGetElementInfo(selector) {
-    if (!selector) return { error: 'selector required' };
+    const emptyShape = { tag: null, id: null, classes: [], role: null, display: null, visibility: null, childCount: 0, textSnippet: '', selector: null };
+    if (!selector) return { ...emptyShape, error: 'selector required' };
     const el = document.querySelector(selector);
-    if (!el) return { error: 'No element matched selector' };
+    if (!el) return { ...emptyShape, error: 'No element matched selector' };
     let display, visibility;
     try {
       const cs = window.getComputedStyle(el);
@@ -824,7 +905,10 @@
   }
 
   function agentToolFindElements(params) {
-    if (!params || typeof params !== 'object') return { error: 'find_elements requires params' };
+    const emptyShape = { matchCount: 0, results: [] };
+    if (!params || typeof params !== 'object') {
+      return { ...emptyShape, error: 'find_elements requires params' };
+    }
     if (params.text != null && typeof params.text === 'string') {
       return agentToolFindElementsContainingText(params.text, params.containerSelector);
     }
@@ -843,31 +927,34 @@
             textSnippet: (el.textContent || '').trim().substring(0, 80)
           });
         }
-        return { bySelector: true, matchCount: nodes.length, results };
+        return { matchCount: nodes.length, results };
       } catch (e) {
-        return { error: 'Invalid selector', matchCount: 0, results: [] };
+        return { ...emptyShape, error: 'Invalid selector' };
       }
     }
     if (params.query != null && typeof params.query === 'string') {
-      return agentToolSearchComponents(params.query);
+      const searchResult = agentToolSearchComponents(params.query);
+      if (searchResult.error) return { ...emptyShape, error: searchResult.error };
+      return { matchCount: searchResult.matchCount ?? searchResult.results?.length ?? 0, results: searchResult.results || [] };
     }
-    return { error: 'find_elements requires one of: text, selector, query' };
+    return { ...emptyShape, error: 'find_elements requires one of: text, selector, query' };
   }
 
   function agentToolInspectElement(params) {
     const selector = params?.selector;
-    if (!selector) return { error: 'inspect_element requires selector' };
+    if (!selector) return { tag: null, id: null, classes: [], role: null, display: null, visibility: null, childCount: 0, textSnippet: '', selector: null, structure: null, error: 'inspect_element requires selector' };
     const info = agentToolGetElementInfo(selector);
-    if (info.error) return info;
+    if (info.error) return { ...info, structure: null };
     const structure = agentToolGetStructure(selector);
     return { ...info, structure: structure.structure };
   }
 
   function agentToolCheckSelector(params) {
+    const emptyShape = { matchCount: 0, visibleCount: 0, message: '' };
     const type = params?.type;
     if (type === 'dom-hide') {
       const selector = params?.selector;
-      if (!selector) return { error: 'check_selector dom-hide requires selector' };
+      if (!selector) return { ...emptyShape, error: 'check_selector dom-hide requires selector' };
       const c = countVisibleSelectorMatches(selector);
       return {
         matchCount: c.total,
@@ -878,7 +965,7 @@
     if (type === 'dom-hide-contains-text') {
       const p = params?.params || params;
       const text = p?.text;
-      if (!text || typeof text !== 'string') return { error: 'check_selector dom-hide-contains-text requires params.text' };
+      if (!text || typeof text !== 'string') return { ...emptyShape, error: 'check_selector dom-hide-contains-text requires params.text' };
       const containerSelector = p?.containerSelector;
       const hideAncestorLevel = typeof p?.hideAncestorLevel === 'number' ? p.hideAncestorLevel : 0;
       const count = countMinimalTextMatches(text, containerSelector, hideAncestorLevel);
@@ -888,15 +975,64 @@
         message: count === 0 ? 'No minimal text matches.' : `${count} minimal text match(es).`
       };
     }
-    return { error: 'check_selector requires type dom-hide or dom-hide-contains-text and selector or params' };
+    return { ...emptyShape, error: 'check_selector requires type dom-hide or dom-hide-contains-text and selector or params' };
+  }
+
+  function editDistance(a, b) {
+    if (a.length === 0) return b.length;
+    if (b.length === 0) return a.length;
+    const m = [];
+    const la = a.length, lb = b.length;
+    for (let i = 0; i <= la; i++) m[i] = [i];
+    for (let j = 0; j <= lb; j++) m[0][j] = j;
+    for (let i = 1; i <= la; i++) {
+      for (let j = 1; j <= lb; j++) {
+        m[i][j] = Math.min(
+          m[i - 1][j] + 1,
+          m[i][j - 1] + 1,
+          m[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)
+        );
+      }
+    }
+    return m[la][lb];
+  }
+
+  function collectSimilarTextCandidates(search, root, maxCandidates) {
+    const seen = new Set();
+    const candidates = [];
+    let nodes = 0;
+    const MAX_NODES = 800;
+    function walk(el) {
+      if (nodes++ > MAX_NODES || candidates.length >= maxCandidates) return;
+      if (el.nodeType !== 1) return;
+      const raw = (el.textContent || '').trim();
+      if (raw.length < 2 || raw.length > 100) {
+        for (const child of el.children) walk(child);
+        return;
+      }
+      const words = raw.split(/\s+/).filter(w => w.length >= 2 && w.length <= 50);
+      for (const w of words) {
+        const wl = w.toLowerCase();
+        if (seen.has(wl)) continue;
+        seen.add(wl);
+        if (editDistance(search, wl) <= 2 || (search.length >= 3 && wl.includes(search)) || (wl.length >= 3 && search.includes(wl))) {
+          candidates.push(w);
+          if (candidates.length >= maxCandidates) return;
+        }
+      }
+      for (const child of el.children) walk(child);
+    }
+    walk(root);
+    return candidates.slice(0, maxCandidates);
   }
 
   function agentToolFindElementsContainingText(text, containerSelector) {
-    if (!text || typeof text !== 'string') return { error: 'text required' };
+    const emptyShape = { matchCount: 0, results: [] };
+    if (!text || typeof text !== 'string') return { ...emptyShape, error: 'text required' };
     const search = text.trim().toLowerCase();
-    if (!search) return { error: 'text required' };
+    if (!search) return { ...emptyShape, error: 'text required' };
     const root = containerSelector ? document.querySelector(containerSelector) : document.body;
-    if (!root) return { error: containerSelector ? 'Container selector did not match' : 'No body' };
+    if (!root) return { ...emptyShape, error: containerSelector ? 'Container selector did not match' : 'No body' };
     const MAX = 30;
     const results = [];
     function walk(el) {
@@ -932,7 +1068,14 @@
       for (const child of el.children) walk(child);
     }
     walk(root);
-    return { matchCount: results.length, results };
+    if (results.length > 0) return { matchCount: results.length, results };
+    const similar = collectSimilarTextCandidates(search, root, 10);
+    const suggestion = {
+      reason: "No elements containing '" + (text.trim().slice(0, 50)) + "' found.",
+      similar_text_found: similar.length ? similar : [],
+      hint: similar.length ? "Try find_elements with text '" + similar[0] + "'" : 'Try a different search string or check the containerSelector.'
+    };
+    return { matchCount: 0, results: [], suggestion };
   }
 
   function runAgentTool(tool, params) {
@@ -940,6 +1083,8 @@
     switch (tool) {
       case 'get_page_overview':
         return agentToolGetPageOverview(p);
+      case 'inspect_section':
+        return agentToolInspectSection(p);
       case 'find_elements':
         return agentToolFindElements(p);
       case 'inspect_element':
@@ -1012,7 +1157,7 @@
           sendResponse({ ok: true, result });
         } catch (e) {
           logError('AGENT_TOOL failed', msg.tool, e.message);
-          sendResponse({ ok: false, error: e.message });
+          sendResponse({ ok: false, error: e.message, context: { hostname, tool: msg.tool } });
         }
         break;
 
@@ -1027,7 +1172,11 @@
           const mod = msg.mod;
           log('Apply mod request', { id: mod.id, type: mod.type, description: mod.description });
           if (mod.type === 'js-safe') {
-            sendResponse({ ok: false, error: 'JS mods are not supported in this version. Use CSS or "Hide element" instead.' });
+            sendResponse({
+              ok: false,
+              error: 'JS mods are not supported in this version. Use CSS or "Hide element" instead.',
+              context: { modType: mod.type, hostname }
+            });
             break;
           }
           const selector = (mod.type === 'dom-hide' && mod.selector) ? mod.selector : null;
@@ -1036,7 +1185,12 @@
             const count = getSelectorMatchCount(selector);
             if (count > SELECTOR_WARN_THRESHOLD) {
               logWarn('Selector matches too many elements', { selector, count, threshold: SELECTOR_WARN_THRESHOLD });
-              sendResponse({ ok: false, matchCount: count, selectorWarn: true });
+              sendResponse({
+                ok: false,
+                matchCount: count,
+                selectorWarn: true,
+                context: { modType: mod.type, hostname, selector }
+              });
               break;
             }
           }
@@ -1045,7 +1199,11 @@
           sendResponse({ ok: true });
         } catch (e) {
           logError('Apply mod failed', e.message);
-          sendResponse({ ok: false, error: e.message });
+          sendResponse({
+            ok: false,
+            error: e.message,
+            context: { modType: msg.mod?.type, modId: msg.mod?.id, hostname }
+          });
         }
         break;
 
@@ -1054,7 +1212,7 @@
           const count = getSelectorMatchCount(msg.selector);
           sendResponse({ ok: true, count });
         } catch (e) {
-          sendResponse({ ok: false, error: e.message });
+          sendResponse({ ok: false, error: e.message, context: { hostname, selector: msg.selector } });
         }
         break;
 
