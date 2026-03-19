@@ -1101,7 +1101,9 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
 
   async function sendMessage(optionalText) {
     const input = document.getElementById('user-input');
-    const text = optionalText !== undefined ? String(optionalText).trim() : input.value.trim();
+    // Click handler passes the event as first arg; only treat real strings as injected text.
+    const useInput = typeof optionalText !== 'string';
+    const text = useInput ? input.value.trim() : optionalText.trim();
     if (!text) return;
 
     if (!apiKey) {
@@ -1115,7 +1117,7 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
 
     const hadElementContext = !!selectedElementContext;
     const wasRefiningMod = refinementTargetMod;
-    if (optionalText === undefined) {
+    if (useInput) {
       input.value = '';
     }
     if (wasRefiningMod) {
