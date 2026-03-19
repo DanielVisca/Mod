@@ -473,7 +473,7 @@ async function callClaudeAPI(messages, systemPrompt, apiKey, traceId) {
       },
       body: JSON.stringify({
         model: CLAUDE_MODEL,
-        max_tokens: 2048,
+        max_tokens: 64000,
         system: systemPrompt,
         messages: messages
       })

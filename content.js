@@ -555,9 +555,11 @@
     }
   }
 
+  const VERIFY_TOO_MANY_THRESHOLD = 30;
+
   function agentToolVerifyMod(params) {
     const mod = params?.mod || params;
-    const emptyShape = { matchCount: 0, visibleCount: 0, message: '' };
+    const emptyShape = { matchCount: 0, visibleCount: 0, message: '', verification_passed: false };
     if (!mod || !mod.type) return { ...emptyShape, error: 'verify_mod requires a mod object (type, selector or params)' };
     const type = mod.type;
     let matchCount = 0;
@@ -575,7 +577,7 @@
       matchCount = countMinimalTextMatches(p.text, containerSelector, hideAncestorLevel);
       visibleCount = matchCount;
     } else if (type === 'css') {
-      return { matchCount: 0, visibleCount: 0, message: 'CSS mods have no selector match count; verify visually.' };
+      return { matchCount: 0, visibleCount: 0, message: 'CSS mods have no selector match count; verify visually.', verification_passed: true };
     } else {
       return { ...emptyShape, error: 'Unsupported mod type for verify_mod' };
     }
@@ -583,10 +585,19 @@
     applyMod(tempMod);
     const afterVisible = type === 'dom-hide' ? countVisibleSelectorMatches(mod.selector).visible : 0;
     removeModById('verify_temp');
-    const message = matchCount === 0
-      ? '0 elements matched. Selector or text may be wrong or content not in DOM yet.'
-      : `${matchCount} element(s) matched, ${visibleCount} visible; after apply: ${matchCount - afterVisible} hidden.`;
-    return { matchCount, visibleCount, message };
+    let reason = null;
+    let message;
+    if (matchCount === 0 || visibleCount === 0) {
+      reason = 'zero_matches';
+      message = '0 elements matched; re-investigate and propose again.';
+    } else if (matchCount > VERIFY_TOO_MANY_THRESHOLD) {
+      reason = 'too_many_matches';
+      message = 'Too many elements matched; narrow the selector or text.';
+    } else {
+      message = `${matchCount} element(s) matched, ${visibleCount} visible; after apply: ${matchCount - afterVisible} hidden.`;
+    }
+    const verification_passed = matchCount > 0 && visibleCount > 0 && matchCount <= VERIFY_TOO_MANY_THRESHOLD;
+    return { matchCount, visibleCount, message, verification_passed, reason };
   }
 
   function removeModById(modId) {

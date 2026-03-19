@@ -1,6 +1,9 @@
 Maybe moonshots
 - Full browser fork instead of extension? Like cursor foriking vscode instead of being an extension?
 - locally cache full websites that instead of just mods ontop, creates full new frontends that interact with the backend. Like wikiwand but for any site.
+- use with ollama so no cost option
+- mod marketplace. Just an s3 bucket and small interface to dstribute and publish mods per site. (example search site, top installed/reviewed mods (recent reviews to see if its still working. etc... ) maybe a way to propose and update to a mod (replacing it) and the owner can approve or deny (store in history? <- nah too complicated deal with this when it comes>))
+- Global site histories and learnings about a site. THis is what we learned about the structure of this site and things that dont work and things that do (ex instagram is notoriously hard right now if I learn a way to get it to work I want that to always apply)
 
 Usability
 - easier wya to iterate on a mod, revert changes or vibe code a mod instead of one off shots
@@ -9,6 +12,8 @@ Usability
 - when clearing mod maybe autorefresh page so it shows right away
 - maybe way to ask/differentiate wherther to apply changes at the root of the site or on the specific endpoint url? (Maybe)
 - reminders that pages are not static and we should design our mods in a way that can handle name changes or updates etc.. as best as possible. 
+- select mod and see the actual code edits
+- right now mod thinks there is a context shift when I switch between pages on the same website just because the url changed. it should all be under the same website.
 
 -- Add dev tools and dev tools api?
 -- Add mod on/off to just be handled in one place and clear when all are off. all oare on with checkboxes of which all are
@@ -124,3 +129,72 @@ But API-response interception (Tier 3) is **stable across deploys.** The JSON st
 This is also why the fetch/XHR monkey-patching approach is more powerful than `declarativeNetRequest` for this use case. `declarativeNetRequest` can redirect or block, but it can't *modify* a response body. Monkey-patching `fetch` in the main world lets you parse the JSON, strip what you don't want, and pass the clean version to the site's framework. The site renders exactly as if the server never sent that data.
 
 So the Fiddler insight is right — you want to operate at the network/data layer, not just the DOM layer. But the implementation should be surgical API interception rather than wholesale bundle replacement. It's more stable, more maintainable, and stays clearly within the Tampermonkey precedent for Web Store policy.
+
+
+--- Make the Agent better ---
+This is a great cross-pollination. The five principles you wrote for PostHog's MCP surface map almost 1:1 onto Mod's agent problems. Let me trace each one.
+
+## The direct transfers
+
+**Principle 1 (Summary first, drill-down on demand)** is exactly the context engineering gap we identified in the Cursor/Lovable deep dive. Right now Mod's `get_page_summary` dumps everything. `get_structure` dumps everything. The agent gets an 80K-character DOM blob and has to reason over all of it.
+
+The fix is the same fix you're proposing for PostHog logs: `get_page_overview` returns element counts by type, visible sections with bounding boxes, detected framework, and a set of section IDs. Then `inspect_section` takes a section ID and returns the actual DOM subtree. The agent decides what to drill into instead of receiving everything upfront. This directly maps to your `search_logs` → `get_log_entries` cursor pattern.
+
+**Principle 3 (Rich error states)** is the one you called "single highest-impact, lowest-effort" for PostHog, and it's exactly the same for Mod. Right now when `find_elements_containing_text` matches zero elements, the agent gets back an empty array. No suggestion, no correction, no "did you mean." Compare your PostHog example:
+
+```json
+{
+  "results": [],
+  "suggestion": {
+    "reason": "No elements containing 'Sponsered' found",
+    "similar_text_found": ["Sponsored", "Suggested for you"],
+    "hint": "Try find_elements with text 'Sponsored'"
+  }
+}
+```
+
+The agent sees the typo correction, retries, succeeds. No human saying "no that didn't work." This is the automated verify-retry loop we identified from Cursor — but implemented at the tool response level rather than as agent logic. Much cleaner.
+
+**Principle 5 (Composable tools with independent inputs)** directly addresses the tool-call efficiency problem. Mod's current tools have implicit dependencies — you need `get_structure` before you can meaningfully call `get_element_info`, because you don't know what selectors exist. If each tool took self-contained inputs (a text query, a CSS selector, a visual description), the agent could fire `find_elements({text: "Sponsored"})`, `check_selector({selector: ".promoted-post"})`, and `get_site_knowledge({hostname: "twitter.com"})` in parallel on the first turn, then synthesize all three results into a single mod proposal.
+
+## The less obvious but more interesting transfers
+
+**Principle 2 (Structured, typed, deterministic outputs)** has a subtlety that matters more for Mod than it might seem. You wrote about KV-cache hit rates and how Manus found that any change to tool output format invalidates the cache from that point forward. Mod's agent makes 3-5 tool calls per user message. If the system prompt is static (which we already recommended from the Cursor analysis) but tool outputs vary in shape between calls, you're blowing the cache on every round trip.
+
+This means Mod's tools should return identical JSON shapes regardless of the result. A `find_elements` call that matches 3 elements and one that matches 0 elements should have the same top-level keys, the same key ordering, the same structure. The difference is in the values, not the shape. This is a small implementation detail that compounds across multi-turn conversations where the agent is refining a mod.
+
+**Principle 4 (Stable tool definitions, runtime masking)** maps to an interesting Mod problem: not all mod types are available on all sites. Hide-by-text only makes sense on dynamic feed sites. API interception only works if the site makes observable fetch calls. CSS-only mods work everywhere. But you shouldn't remove tools from the agent's context based on site type — that's the dynamic tool set problem Manus warned about. Instead, if the agent tries to propose an API interception mod on a site that doesn't make interceptable fetch calls, the tool response should say:
+
+```json
+{
+  "status": "unavailable",
+  "reason": "No interceptable fetch/XHR calls detected on this page",
+  "alternative": "Try propose_mod with type 'hide-by-text' instead"
+}
+```
+
+Same tool surface every time. Availability communicated at response level.
+
+## The one principle that's missing from both documents
+
+There's a pattern that emerged from the Cursor deep dive that neither your PostHog doc nor the Mod analysis fully captures: **progressive context accumulation across turns.**
+
+Cursor's agent doesn't start fresh on each turn. It carries forward a compressed representation of what it's already discovered — which files it read, what it found, what edits it made. Manus calls this "filesystem as infinite memory."
+
+For Mod, this maps to conversation-level site knowledge that builds across turns:
+
+- Turn 1: Agent calls `get_page_overview`, discovers it's a React site with CSS modules
+- Turn 2: Agent calls `find_elements({text: "Sponsored"})`, finds 4 matches
+- Turn 3: User says "also hide Suggested for you" — the agent already knows the framework, already knows text-based matching works on this site, and goes straight to `find_elements` without re-running the overview
+
+The tool responses from earlier turns should include lightweight reference tokens (like your cursor pattern for PostHog logs) that the agent can pass back in subsequent calls to skip re-discovery. Something like a `site_context_id` that the extension caches locally — containing framework, successful selectors, DOM fingerprint — so the agent can say "I already know about this page, just find the new thing."
+
+This is the same insight as your PostHog cursor-based pagination, but applied to investigation state rather than result sets. And it directly addresses Cursor's finding that long conversations accumulate noise — by letting the agent carry forward a compressed token instead of the full context of every previous investigation.
+
+## Where this converges
+
+The PostHog document and the Mod agent analysis are really the same document applied to different domains. Both are about: how do you design tool interfaces so that an AI agent can reliably accomplish multi-step tasks without human correction? The answer from every source — Cursor, Manus, Lovable, Anthropic — is the same: small responses, typed contracts, rich errors, parallel independence, and progressive disclosure.
+
+The fact that you're working on both simultaneously is an advantage. The design principles you ship for PostHog's MCP tools will directly inform how you build Mod's tools, and vice versa. The schema contract pattern you enforce for `search_logs` is the same pattern your `find_elements` tool should follow. The error-with-suggestion pattern for misspelled service names is the same pattern for misspelled text-match queries. You're building the same muscle in two contexts.
+
+Because we switch between tabs and websites. the agent should know which site we are currently on and only be using the context and learnings from the currently used site (active tab) and properly store it as we may leave side panel open and switch to another site. the active webpage is suddenly different. Maybe it should recognize this and have conversations dependent on the page?

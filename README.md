@@ -1,4 +1,8 @@
-# Mod — AI that sees and modifies any website, persistently
+# Mod — Why does everyone visiting the same site have to see the same thing?
+
+Your web, your way. Personalize how any site should look and work — for you.
+
+Mod lets you personalize any website. Describe what you'd change — hide the clutter, rearrange the layout, redesign the look — and AI makes it happen. Same site, same functionality, tailored to you. Every visit.
 
 A **Chrome extension** that lets you change any site in plain English: describe what you want (or select an element), and the AI suggests CSS or “hide element” mods. Apply & Save once; Mod re-applies on every visit to that site.
 
