@@ -1811,12 +1811,23 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
         event: 'mod_shared',
         properties: { hostname: currentHostname, mod_type: mod.type }
       }).catch(() => {});
-      showImportFeedback(
+      showSideToast(
         'Copied to clipboard. On the Mods tab, paste under Import a shared mod, then click Add to this site (for the site open in the tab).'
       );
     } catch (e) {
-      showImportFeedback('Could not copy. Try selecting and copying the Share link manually.');
+      showSideToast('Could not copy. Try selecting and copying the Share link manually.', true);
     }
+  }
+
+  function showSideToast(message, isError) {
+    const el = document.getElementById('sidepanel-toast');
+    if (!el) return;
+    el.textContent = message;
+    el.className = 'sidepanel-toast' + (isError ? ' error' : '') + ' visible';
+    clearTimeout(showSideToast._tid);
+    showSideToast._tid = setTimeout(() => {
+      el.classList.remove('visible');
+    }, 4500);
   }
 
   function showImportFeedback(message, isError) {

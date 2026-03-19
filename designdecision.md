@@ -11,3 +11,7 @@ When console monitoring or apply-mod (or other agent-facing operations) fail, we
 ## Per-mod enable/disable without full page reload
 
 When the user toggles a mod in the Mods list, we persist via `TOGGLE_MOD` then ask the active tab’s content script to handle `REFRESH_MODS_STATE`, which re-reads storage and reapplies. We do **not** call `location.reload()` so the update feels instant and doesn’t reset SPA state. Reapply is implemented as **strip then apply**: `removeAllModStyles()` removes injected `<style data-mod-id>`, observers, and text-hide markers, then enabled mods are applied in order—so turning a mod **off** actually removes its effect, not only stacking new styles for mods that stay on.
+
+## Share → clipboard feedback (toast)
+
+“Copied” confirmations use a **fixed bottom toast** (`#sidepanel-toast`) so they appear in the same place regardless of scroll or whether the user clicked Share at the top of the mod list. That matches common OS/app patterns (snackbar). Import validation and “mod added” still use `#import-mod-feedback` next to the import controls where the message is contextually anchored.

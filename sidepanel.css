@@ -672,6 +672,36 @@ body {
   color: #c00;
 }
 
+/* Transient “copied” / info — fixed so it isn’t tied to Import section scroll position */
+.sidepanel-toast {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: 16px;
+  max-width: 100%;
+  padding: 10px 14px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #fff;
+  background: rgba(30, 30, 30, 0.94);
+  border-radius: 8px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+  z-index: 99999;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(8px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.sidepanel-toast.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.sidepanel-toast.error {
+  background: rgba(110, 35, 35, 0.96);
+}
+
 #settings-view {
   padding: 16px;
 }
