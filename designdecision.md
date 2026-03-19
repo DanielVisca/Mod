@@ -7,3 +7,7 @@ We avoid inline script for console monitoring so the extension is not blocked by
 ## Failures fed back to the agent with context
 
 When console monitoring or apply-mod (or other agent-facing operations) fail, we return structured error info to the agent: `error`/`message`, and `context` (hostname, modType, selector, etc.) so the agent can reason about what failed and adapt (e.g. avoid relying on console on that page, or suggest a different mod).
+
+## Per-mod enable/disable without full page reload
+
+When the user toggles a mod in the Mods list, we persist via `TOGGLE_MOD` then ask the active tab’s content script to handle `REFRESH_MODS_STATE`, which re-reads storage and reapplies. We do **not** call `location.reload()` so the update feels instant and doesn’t reset SPA state. Reapply is implemented as **strip then apply**: `removeAllModStyles()` removes injected `<style data-mod-id>`, observers, and text-hide markers, then enabled mods are applied in order—so turning a mod **off** actually removes its effect, not only stacking new styles for mods that stay on.

@@ -183,6 +183,8 @@
         log('No mods in storage for this host — key was', storageKey);
       }
 
+      removeAllModStyles();
+
       let applied = 0;
       for (const mod of mods) {
         if (!mod.enabled) continue;

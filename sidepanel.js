@@ -420,23 +420,26 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
     if (toggle && label) label.textContent = toggle.checked ? 'Mods on' : 'Mods off';
   }
 
+  async function refreshContentModsState() {
+    if (!currentTabId) return;
+    try {
+      await chrome.runtime.sendMessage({
+        type: 'SEND_TO_CONTENT',
+        tabId: currentTabId,
+        payload: { type: 'REFRESH_MODS_STATE' }
+      });
+    } catch (e) {
+      console.warn('[Mod] Could not refresh content script (tab may be chrome:// or gone):', e.message);
+    }
+  }
+
   async function onModsToggleChange() {
     const enabled = document.getElementById('mods-enabled-toggle').checked;
     updateModsToggleLabel();
     const settings = await chrome.storage.local.get('settings');
     const current = settings.settings || {};
     await chrome.storage.local.set({ settings: { ...current, modsEnabled: enabled } });
-    if (currentTabId) {
-      try {
-        await chrome.runtime.sendMessage({
-          type: 'SEND_TO_CONTENT',
-          tabId: currentTabId,
-          payload: { type: 'REFRESH_MODS_STATE' }
-        });
-      } catch (e) {
-        console.warn('[Mod] Could not refresh content script (tab may be chrome:// or gone):', e.message);
-      }
-    }
+    await refreshContentModsState();
   }
 
   function isSupportedPage(url) {
@@ -1698,13 +1701,21 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
       });
 
       modEl.querySelector('input[type="checkbox"]').addEventListener('change', async (e) => {
-        await chrome.runtime.sendMessage({
-          type: 'TOGGLE_MOD',
-          hostname: currentHostname,
-          modId: e.target.dataset.id,
-          enabled: e.target.checked
-        });
-        addSystemMessage('Refresh the page to see the change.');
+        const input = e.target;
+        const enabled = input.checked;
+        try {
+          await chrome.runtime.sendMessage({
+            type: 'TOGGLE_MOD',
+            hostname: currentHostname,
+            modId: input.dataset.id,
+            enabled
+          });
+          await refreshContentModsState();
+          addSystemMessage('Updated on this page.');
+        } catch (err) {
+          console.warn('[Mod] Toggle mod or refresh failed:', err);
+          input.checked = !enabled;
+        }
       });
 
       modEl.querySelector('.btn-share').addEventListener('click', () => copyModShare(mod));
