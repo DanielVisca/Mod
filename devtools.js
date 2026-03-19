@@ -44,7 +44,8 @@
       });
       return;
     }
-    if (msg.type !== 'RUN_AGENT_TOOL_IN_PAGE' || msg.tool !== 'find_elements_containing_text') return;
+    const isFindElements = msg.tool === 'find_elements_containing_text' || (msg.tool === 'find_elements' && msg.params && msg.params.text != null);
+    if (msg.type !== 'RUN_AGENT_TOOL_IN_PAGE' || !isFindElements) return;
     const params = msg.params || {};
     const text = params.text;
     const containerSelector = params.containerSelector;

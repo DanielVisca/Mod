@@ -105,6 +105,33 @@ chrome.action.onClicked.addListener(async (tab) => {
 // Allow side panel to open on all sites
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 
+// =========================================
+// Network monitoring (recent 4xx/5xx per tab for agent)
+// =========================================
+const NETWORK_ERROR_WINDOW_MS = 30000;
+const networkErrorsByTabId = {};
+
+chrome.webRequest.onCompleted.addListener(
+  (details) => {
+    const status = details.statusCode || 0;
+    if (status < 400) return;
+    const tabId = details.tabId;
+    if (tabId < 0) return;
+    if (!networkErrorsByTabId[tabId]) networkErrorsByTabId[tabId] = [];
+    const list = networkErrorsByTabId[tabId];
+    list.push({
+      url: details.url,
+      statusCode: status,
+      method: details.method,
+      timestamp: Date.now()
+    });
+    const cut = Date.now() - NETWORK_ERROR_WINDOW_MS;
+    while (list.length && list[0].timestamp < cut) list.shift();
+    if (list.length > 50) list.splice(0, list.length - 50);
+  },
+  { urls: ['<all_urls>'] }
+);
+
 // Track active tab for side panel context
 let activeTabId = null;
 
@@ -187,7 +214,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const devtoolsPort = devtoolsPortByTabId[msg.tabId];
       const isAgentTool = payload && payload.type === 'AGENT_TOOL';
       const tool = isAgentTool ? payload.tool : null;
-      const delegateToDevTools = devtoolsPort && isAgentTool && tool === 'find_elements_containing_text';
+      const params = payload?.params || {};
+      const delegateFindElements = tool === 'find_elements_containing_text' || (tool === 'find_elements' && params.text != null);
+      const delegateToDevTools = devtoolsPort && isAgentTool && delegateFindElements;
       if (delegateToDevTools) {
         const requestId = generateId();
         const timeout = setTimeout(() => {
@@ -239,6 +268,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             is_update: isUpdate
           });
           updateBadgeForActiveTab();
+          const skKey = `siteKnowledge:${hostname}`;
+          chrome.storage.local.get(skKey).then((res) => {
+            const sk = res[skKey] || {};
+            let sel = null;
+            if (mod.type === 'dom-hide' && mod.selector) sel = mod.selector;
+            else if (mod.type === 'dom-hide-contains-text' && mod.params?.text) sel = `dom-hide-contains-text:${mod.params.text}`;
+            else if (mod.type === 'css') sel = 'css';
+            if (sel) {
+              const list = sk.successfulSelectors || [];
+              if (!list.includes(sel)) {
+                list.push(sel);
+                sk.successfulSelectors = list.slice(-20);
+              }
+              chrome.storage.local.set({ [skKey]: sk }).catch(() => {});
+            }
+          }).catch(() => {});
           sendResponse({ ok: true });
         }).catch((e) => {
           log('SAVE_MOD failed', e);
@@ -257,6 +302,53 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const mods = result[key] || [];
         log('GET_MODS', { hostname: msg.hostname, key, count: mods.length });
         sendResponse({ mods });
+      });
+      return true;
+    }
+
+    case 'GET_SITE_KNOWLEDGE': {
+      const host = canonicalHostname(msg.hostname);
+      const modsKey = `mods:${host}`;
+      const skKey = `siteKnowledge:${host}`;
+      chrome.storage.local.get([modsKey, skKey]).then((result) => {
+        const mods = result[modsKey] || [];
+        const sk = result[skKey] || {};
+        sendResponse({
+          framework: sk.framework ?? null,
+          lastDetectedAt: sk.lastDetectedAt ?? null,
+          successfulSelectors: sk.successfulSelectors || [],
+          existingMods: mods.map(m => ({ id: m.id, description: m.description, type: m.type, selector: m.selector }))
+        });
+      });
+      return true;
+    }
+
+    case 'GET_RECENT_NETWORK_ERRORS': {
+      const tabId = msg.tabId;
+      const list = (tabId != null && networkErrorsByTabId[tabId]) ? networkErrorsByTabId[tabId] : [];
+      const cut = Date.now() - NETWORK_ERROR_WINDOW_MS;
+      const recent = list.filter((e) => e.timestamp >= cut).slice(-20);
+      sendResponse({ recent, message: recent.length === 0 ? 'No 4xx/5xx requests in the last 30s.' : recent.length + ' failed request(s) in the last 30s. If these appeared after your mod, the selector might have broken a critical element.' });
+      return true;
+    }
+
+    case 'UPDATE_SITE_KNOWLEDGE': {
+      const host = canonicalHostname(msg.hostname);
+      const skKey = `siteKnowledge:${host}`;
+      chrome.storage.local.get(skKey).then((result) => {
+        const sk = result[skKey] || {};
+        if (msg.framework != null) {
+          sk.framework = msg.framework;
+          sk.lastDetectedAt = Date.now();
+        }
+        if (msg.successfulSelector != null) {
+          const list = sk.successfulSelectors || [];
+          if (!list.includes(msg.successfulSelector)) {
+            list.push(msg.successfulSelector);
+            sk.successfulSelectors = list.slice(-20);
+          }
+        }
+        chrome.storage.local.set({ [skKey]: sk }).then(() => sendResponse({ ok: true }));
       });
       return true;
     }

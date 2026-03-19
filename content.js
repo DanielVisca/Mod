@@ -27,6 +27,57 @@
   log('Content script loaded', { hostname, storageHostname, url: window.location.href });
 
   // =========================================
+  // Console monitoring (page errors for agent)
+  // =========================================
+  const CONSOLE_BUFFER_MAX = 20;
+  const consoleErrorBuffer = [];
+
+  function capturePageConsole() {
+    if (window.__MOD_CONSOLE_PATCH_INJECTED) return;
+    const script = document.createElement('script');
+    script.textContent = [
+      '(function() {',
+      '  var o = window.console;',
+      '  if (!o || o.__MOD_PATCHED) return;',
+      '  var orig = { error: o.error, warn: o.warn };',
+      '  function send(level, args) {',
+      '    try {',
+      '      var str = args.map(function(a) { try { return typeof a === "string" ? a : JSON.stringify(a); } catch(e) { return String(a); } }).join(" ");',
+      '      window.postMessage({ type: "MOD_CONSOLE", level: level, args: str, timestamp: Date.now() }, "*");',
+      '    } catch(e) {}',
+      '  }',
+      '  o.error = function() { orig.error.apply(o, arguments); send("error", Array.prototype.slice.call(arguments)); };',
+      '  o.warn = function() { orig.warn.apply(o, arguments); send("warn", Array.prototype.slice.call(arguments)); };',
+      '  o.__MOD_PATCHED = true;',
+      '  window.__MOD_CONSOLE_PATCH_INJECTED = true;',
+      '})();'
+    ].join('\n');
+    (document.documentElement || document.head).appendChild(script);
+    script.remove();
+  }
+
+  window.addEventListener('message', function(ev) {
+    if (ev.source !== window || !ev.data || ev.data.type !== 'MOD_CONSOLE') return;
+    consoleErrorBuffer.push({
+      level: ev.data.level || 'error',
+      args: ev.data.args != null ? String(ev.data.args) : '',
+      timestamp: ev.data.timestamp || Date.now()
+    });
+    if (consoleErrorBuffer.length > CONSOLE_BUFFER_MAX) consoleErrorBuffer.shift();
+  });
+
+  capturePageConsole();
+
+  function getConsoleErrors() {
+    return {
+      recent: consoleErrorBuffer.slice(-10),
+      message: consoleErrorBuffer.length === 0
+        ? 'No console errors or warnings captured from the page.'
+        : 'Last ' + Math.min(10, consoleErrorBuffer.length) + ' console error(s)/warning(s) from the page. If these appeared after your mod, consider narrowing the selector or reverting.'
+    };
+  }
+
+  // =========================================
   // PART 1: Apply saved mods on page load
   // =========================================
 
@@ -468,6 +519,75 @@
     return { error: 'type must be dom-hide or dom-hide-contains-text' };
   }
 
+  function countVisibleSelectorMatches(selector) {
+    try {
+      const nodes = document.querySelectorAll(selector);
+      let visible = 0;
+      for (let i = 0; i < nodes.length; i++) {
+        const el = nodes[i];
+        if (el.nodeType !== 1) continue;
+        try {
+          const cs = window.getComputedStyle(el);
+          if (cs.display !== 'none' && cs.visibility !== 'hidden' && el.offsetParent !== null) visible++;
+        } catch (_) {}
+      }
+      return { total: nodes.length, visible };
+    } catch (_) {
+      return { total: 0, visible: 0 };
+    }
+  }
+
+  function agentToolVerifyMod(params) {
+    const mod = params?.mod || params;
+    if (!mod || !mod.type) return { error: 'verify_mod requires a mod object (type, selector or params)' };
+    const type = mod.type;
+    let matchCount = 0;
+    let visibleCount = 0;
+    if (type === 'dom-hide') {
+      const selector = mod.selector;
+      if (!selector) return { error: 'dom-hide mod requires selector' };
+      const c = countVisibleSelectorMatches(selector);
+      matchCount = c.total;
+      visibleCount = c.visible;
+    } else if (type === 'dom-hide-contains-text' && mod.params && typeof mod.params.text === 'string') {
+      const p = mod.params;
+      const containerSelector = p.containerSelector;
+      const hideAncestorLevel = typeof p.hideAncestorLevel === 'number' ? p.hideAncestorLevel : 0;
+      matchCount = countMinimalTextMatches(p.text, containerSelector, hideAncestorLevel);
+      visibleCount = matchCount;
+    } else if (type === 'css') {
+      return { matchCount: 0, visibleCount: 0, message: 'CSS mods have no selector match count; verify visually.' };
+    } else {
+      return { error: 'Unsupported mod type for verify_mod' };
+    }
+    const tempMod = { ...mod, id: 'verify_temp' };
+    applyMod(tempMod);
+    const afterVisible = type === 'dom-hide' ? countVisibleSelectorMatches(mod.selector).visible : 0;
+    removeModById('verify_temp');
+    const message = matchCount === 0
+      ? '0 elements matched. Selector or text may be wrong or content not in DOM yet.'
+      : `${matchCount} element(s) matched, ${visibleCount} visible; after apply: ${matchCount - afterVisible} hidden.`;
+    return { matchCount, visibleCount, message };
+  }
+
+  function removeModById(modId) {
+    if (domHideContainsTextObservers[modId]) {
+      domHideContainsTextObservers[modId].disconnect();
+      delete domHideContainsTextObservers[modId];
+    }
+    const tid = domHideContainsTextDebounce[modId];
+    if (tid) {
+      clearTimeout(tid);
+      delete domHideContainsTextDebounce[modId];
+    }
+    document.querySelectorAll(`[data-mod-hidden-by="${modId}"]`).forEach(el => {
+      el.style.removeProperty('display');
+      delete el.dataset.modHiddenBy;
+    });
+    const styleEl = document.querySelector(`style[data-mod-id="${modId}"]`);
+    if (styleEl) styleEl.remove();
+  }
+
   function getSelector(el) {
     if (!el || !el.tagName) return null;
     if (el.id && /^[a-zA-Z][\w-]*$/.test(el.id)) return '#' + el.id;
@@ -528,6 +648,18 @@
   // =========================================
   // Agent tools (for truly agentic loop)
   // =========================================
+
+  function agentToolGetPageOverview(params) {
+    const summary = agentToolGetPageSummary();
+    const component = agentToolGetComponentSummary();
+    const framework = agentToolDetectFramework();
+    return {
+      ...summary,
+      sections: component.sections,
+      framework: (framework.frameworks && framework.frameworks[0]) || 'Unknown',
+      rootId: framework.rootId
+    };
+  }
 
   function agentToolGetPageSummary() {
     const metaDesc = document.querySelector('meta[name="description"]');
@@ -691,6 +823,74 @@
     };
   }
 
+  function agentToolFindElements(params) {
+    if (!params || typeof params !== 'object') return { error: 'find_elements requires params' };
+    if (params.text != null && typeof params.text === 'string') {
+      return agentToolFindElementsContainingText(params.text, params.containerSelector);
+    }
+    if (params.selector != null && typeof params.selector === 'string') {
+      try {
+        const nodes = document.querySelectorAll(params.selector);
+        const MAX = 20;
+        const results = [];
+        for (let i = 0; i < Math.min(nodes.length, MAX); i++) {
+          const el = nodes[i];
+          if (el.nodeType !== 1) continue;
+          results.push({
+            selector: getSelector(el),
+            tag: el.tagName.toLowerCase(),
+            role: el.getAttribute('role'),
+            textSnippet: (el.textContent || '').trim().substring(0, 80)
+          });
+        }
+        return { bySelector: true, matchCount: nodes.length, results };
+      } catch (e) {
+        return { error: 'Invalid selector', matchCount: 0, results: [] };
+      }
+    }
+    if (params.query != null && typeof params.query === 'string') {
+      return agentToolSearchComponents(params.query);
+    }
+    return { error: 'find_elements requires one of: text, selector, query' };
+  }
+
+  function agentToolInspectElement(params) {
+    const selector = params?.selector;
+    if (!selector) return { error: 'inspect_element requires selector' };
+    const info = agentToolGetElementInfo(selector);
+    if (info.error) return info;
+    const structure = agentToolGetStructure(selector);
+    return { ...info, structure: structure.structure };
+  }
+
+  function agentToolCheckSelector(params) {
+    const type = params?.type;
+    if (type === 'dom-hide') {
+      const selector = params?.selector;
+      if (!selector) return { error: 'check_selector dom-hide requires selector' };
+      const c = countVisibleSelectorMatches(selector);
+      return {
+        matchCount: c.total,
+        visibleCount: c.visible,
+        message: `${c.total} match(es), ${c.visible} visible.`
+      };
+    }
+    if (type === 'dom-hide-contains-text') {
+      const p = params?.params || params;
+      const text = p?.text;
+      if (!text || typeof text !== 'string') return { error: 'check_selector dom-hide-contains-text requires params.text' };
+      const containerSelector = p?.containerSelector;
+      const hideAncestorLevel = typeof p?.hideAncestorLevel === 'number' ? p.hideAncestorLevel : 0;
+      const count = countMinimalTextMatches(text, containerSelector, hideAncestorLevel);
+      return {
+        matchCount: count,
+        visibleCount: count,
+        message: count === 0 ? 'No minimal text matches.' : `${count} minimal text match(es).`
+      };
+    }
+    return { error: 'check_selector requires type dom-hide or dom-hide-contains-text and selector or params' };
+  }
+
   function agentToolFindElementsContainingText(text, containerSelector) {
     if (!text || typeof text !== 'string') return { error: 'text required' };
     const search = text.trim().toLowerCase();
@@ -736,23 +936,42 @@
   }
 
   function runAgentTool(tool, params) {
+    const p = params || {};
     switch (tool) {
+      case 'get_page_overview':
+        return agentToolGetPageOverview(p);
+      case 'find_elements':
+        return agentToolFindElements(p);
+      case 'inspect_element':
+        return agentToolInspectElement(p);
+      case 'check_selector':
+        return agentToolCheckSelector(p);
+      case 'propose_mod':
+        return { error: 'propose_mod is handled in the side panel' };
+      case 'verify_mod':
+        return agentToolVerifyMod(p?.mod || p);
+      case 'get_site_knowledge':
+        return { error: 'get_site_knowledge is handled in the side panel' };
+      case 'get_console_errors':
+        return getConsoleErrors();
+      case 'web_search':
+        return { message: 'Web search is not configured. Use get_site_knowledge and page tools instead.' };
       case 'get_page_summary':
         return agentToolGetPageSummary();
       case 'get_structure':
-        return agentToolGetStructure(params?.selector);
+        return agentToolGetStructure(p.selector);
       case 'search_components':
-        return agentToolSearchComponents(params?.query);
+        return agentToolSearchComponents(p.query);
       case 'detect_framework':
         return agentToolDetectFramework();
       case 'get_component_summary':
         return agentToolGetComponentSummary();
       case 'get_element_info':
-        return agentToolGetElementInfo(params?.selector);
+        return agentToolGetElementInfo(p.selector);
       case 'find_elements_containing_text':
-        return agentToolFindElementsContainingText(params?.text, params?.containerSelector);
+        return agentToolFindElementsContainingText(p.text, p.containerSelector);
       case 'simulate_mod_effect':
-        return agentToolSimulateModEffect(params);
+        return agentToolSimulateModEffect(p);
       default:
         return { error: 'Unknown tool: ' + tool };
     }
@@ -783,6 +1002,13 @@
       case 'AGENT_TOOL':
         try {
           const result = runAgentTool(msg.tool, msg.params || {});
+          if (msg.tool === 'detect_framework' && result && !result.error && Array.isArray(result.frameworks) && result.frameworks.length > 0) {
+            chrome.runtime.sendMessage({
+              type: 'UPDATE_SITE_KNOWLEDGE',
+              hostname: storageHostname,
+              framework: result.frameworks[0]
+            }).catch(() => {});
+          }
           sendResponse({ ok: true, result });
         } catch (e) {
           logError('AGENT_TOOL failed', msg.tool, e.message);

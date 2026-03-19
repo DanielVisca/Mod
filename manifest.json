@@ -8,7 +8,8 @@
     "sidePanel",
     "storage",
     "activeTab",
-    "scripting"
+    "scripting",
+    "webRequest"
   ],
 
   "host_permissions": [
