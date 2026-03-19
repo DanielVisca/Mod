@@ -1811,7 +1811,9 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
         event: 'mod_shared',
         properties: { hostname: currentHostname, mod_type: mod.type }
       }).catch(() => {});
-      showImportFeedback('Copied! Send this to anyone with Mod—they can paste it in Import.');
+      showImportFeedback(
+        'Copied to clipboard. On the Mods tab, paste under Import a shared mod, then click Add to this site (for the site open in the tab).'
+      );
     } catch (e) {
       showImportFeedback('Could not copy. Try selecting and copying the Share link manually.');
     }
