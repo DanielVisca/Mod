@@ -440,6 +440,10 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
     const current = settings.settings || {};
     await chrome.storage.local.set({ settings: { ...current, modsEnabled: enabled } });
     await refreshContentModsState();
+    const modsView = document.getElementById('mods-view');
+    if (modsView && modsView.classList.contains('active')) {
+      renderModsList();
+    }
   }
 
   function isSupportedPage(url) {
@@ -1667,6 +1671,7 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
 
     if (!currentHostname) {
       listEl.innerHTML = '<p class="empty">Navigate to a website first.</p>';
+      listEl.classList.remove('mods-globally-off');
       return;
     }
 
@@ -1678,8 +1683,13 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
 
     if (mods.length === 0) {
       listEl.innerHTML = `<p class="empty">No mods saved for ${currentHostname}</p>`;
+      listEl.classList.remove('mods-globally-off');
       return;
     }
+
+    const settings = await chrome.storage.local.get('settings');
+    const modsGloballyOn = settings.settings?.modsEnabled !== false;
+    listEl.classList.toggle('mods-globally-off', !modsGloballyOn);
 
     mods.forEach(mod => {
       const modEl = document.createElement('div');

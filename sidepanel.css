@@ -539,8 +539,44 @@ body {
   background: #fff;
 }
 
-.mod-item.disabled {
+/* Per-mod off only when global "Mods on" — avoids double-fade vs .mods-globally-off */
+#mods-list:not(.mods-globally-off) .mod-item.disabled {
   opacity: 0.5;
+}
+
+/* Global "Mods off": all rows look inactive; checkboxes keep state but read as off */
+#mods-list.mods-globally-off .mod-item {
+  opacity: 0.58;
+  background: #f7f7f7;
+  border-color: #e6e6e6;
+}
+
+#mods-list.mods-globally-off .mod-item .mod-item-description {
+  color: #777;
+}
+
+#mods-list.mods-globally-off .mod-item .mod-item-meta {
+  color: #9a9a9a;
+}
+
+#mods-list.mods-globally-off .mod-item .btn-share {
+  color: #c9c9c9;
+}
+
+#mods-list.mods-globally-off .mod-item .btn-delete {
+  color: #d4a8a8;
+}
+
+#mods-list.mods-globally-off .mod-item .btn-share:hover {
+  color: #b5b5b5;
+}
+
+#mods-list.mods-globally-off .mod-item .btn-delete:hover {
+  color: #c9a0a0;
+}
+
+#mods-list.mods-globally-off .mod-item.disabled {
+  opacity: 0.42;
 }
 
 .mod-item-header {
