@@ -15,3 +15,7 @@ When the user toggles a mod in the Mods list, we persist via `TOGGLE_MOD` then a
 ## Share → clipboard feedback (toast)
 
 “Copied” confirmations use a **fixed bottom toast** (`#sidepanel-toast`) so they appear in the same place regardless of scroll or whether the user clicked Share at the top of the mod list. That matches common OS/app patterns (snackbar). Import validation and “mod added” still use `#import-mod-feedback` next to the import controls where the message is contextually anchored.
+
+## PostHog / product analytics
+
+All `posthogCapture` events are merged with `extension_version` and `product: 'mod'` in the service worker so funnels stay comparable across releases. Side panel code uses `captureAnalytics()` so `hostname` is attached consistently when available. Agent tools are logged per execution (`agent_tool_executed`) and per batch (`agent_tools_batch`); conversation turns end with `conversation_turn_completed` (outcome + tools + whether a mod card was shown). `mod_saved` includes `save_source` (`apply_and_save_chat`, `import_paste`, `refinement_auto_apply`, etc.) to separate create/update paths from imports.

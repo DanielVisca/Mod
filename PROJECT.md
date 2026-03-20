@@ -30,7 +30,7 @@ No build step. No npm. Just the extension folder.
 - **Context:** Page context, landmarks, optional **DevTools $0** (selected element in Elements panel when DevTools open), last applied mod, existing mods.
 - **DevTools:** `devtools.js` + `devtools.html` — when DevTools is open for the tab, find_elements_containing_text runs in the page via `inspectedWindow.eval` for accurate minimal-node search; also provides $0 for context.
 - **Panic:** Ctrl+Shift+M disables all mods for current site and reloads.
-- **Analytics:** PostHog capture for install, panel open, message_sent, apply_and_save, mod_saved/deleted/toggled/reverted, agent_tools_used, view_changed, goal_set/cleared, mod_rejected, did_this_work_no, mod_previewed, mod_shared, refinement_started, $ai_generation.
+- **Analytics:** PostHog — enriched with `extension_version` + `product`; per-tool `agent_tool_executed`, batch `agent_tools_batch`, turn summary `conversation_turn_completed`, verify steps, mod card / preview / apply funnel, `did_this_work_yes/no`, `mods_globally_toggled`, `active_tab_changed`, `save_source` on `mod_saved`. See README PostHog section.
 
 ---
 

@@ -102,7 +102,17 @@ Mods are stored **per hostname** and applied by selectors. Site redesigns or cha
 
 Events are sent to PostHog (see `background.js` → `POSTHOG_API_KEY`). If the key is empty, capture is skipped.
 
-**Events:** `extension_installed`, `side_panel_opened`, `view_changed`, `message_sent` (incl. `indicates_mod_failure`), `apply_and_save`, `mod_saved`, `mod_deleted`, `mod_toggled`, `mod_reverted`, `mods_disabled_all`, `mod_rejected`, `did_this_work_no`, `goal_set`, `goal_cleared`, `mod_previewed` (source: chat/detail), `mod_shared`, `refinement_started`, `refinement_auto_applied`, `agent_tools_used`, `selector_activated`, `element_selected`, `selector_cancelled`, `mod_imported`, `settings_saved`, `$ai_generation` (model, tokens, latency, errors).
+**Common properties:** Every event includes `extension_version`, `product: mod`, and `hostname` when the side panel knows the active site.
+
+**Panel & navigation:** `side_panel_opened` (initial view, API key presence), `view_changed` (chat | mods | settings), `active_tab_changed` (browser tab / navigation context), `mods_globally_toggled` (master Mods on/off).
+
+**Chat & agent:** `message_sent` (length, goal, refinement, element context, failure hints), `conversation_turn_completed` (trace id, end reason, AI rounds, distinct tools used, whether a mod card was offered), `agent_tool_executed` (per tool, success, phase, round), `agent_tools_batch` / `agent_tools_used` (batch summary), `$ai_generation` (model, tokens, latency, errors — includes message payloads).
+
+**Mod proposal funnel:** `mod_card_shown`, `mod_verify_attempt`, `mod_verify_finished`, `mod_previewed` / `mod_preview_failed`, `mod_rejected`, `apply_and_save`, `apply_failed`, `apply_cancelled_wide_selector`, `did_this_work_yes` / `did_this_work_no`.
+
+**Mods list & share:** `mod_saved` (incl. `save_source`: apply/import/refinement), `mod_deleted`, `mod_toggled` (incl. `source`, e.g. `mods_list`), `mod_reverted`, `mods_disabled_all`, `mod_shared`, `mod_imported` (`source: import_paste`).
+
+**Other:** `goal_set` / `goal_cleared`, `refinement_started` / `refinement_auto_applied`, `selector_activated`, `element_selected`, `selector_cancelled`, `settings_saved`, `mod_preview_stopped`, `extension_installed`.
 
 ---
 

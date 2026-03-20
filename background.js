@@ -36,11 +36,17 @@ async function posthogCapture(event, properties = {}) {
   }
   try {
     const { distinctId } = await getDistinctId();
+    const manifest = chrome.runtime.getManifest();
+    const enrichedProps = {
+      ...properties,
+      extension_version: manifest.version,
+      product: 'mod'
+    };
     const payload = {
       api_key: POSTHOG_API_KEY,
       event,
       distinct_id: distinctId,
-      properties,
+      properties: enrichedProps,
       timestamp: new Date().toISOString()
     };
     const res = await fetch(POSTHOG_ENDPOINT, {
@@ -265,7 +271,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             hostname,
             mod_type: mod.type,
             mod_description: mod.description,
-            is_update: isUpdate
+            is_update: isUpdate,
+            save_source: msg.source || 'unknown'
           });
           updateBadgeForActiveTab();
           const skKey = `siteKnowledge:${hostname}`;
@@ -365,7 +372,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       toggleMod(canonicalHostname(msg.hostname), msg.modId, msg.enabled).then(() => {
         posthogCapture('mod_toggled', {
           hostname: canonicalHostname(msg.hostname),
-          enabled: msg.enabled
+          enabled: msg.enabled === true,
+          source: msg.source || 'unknown'
         });
         updateBadgeForActiveTab();
         sendResponse({ ok: true });

@@ -120,7 +120,15 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
   let refinementTargetMod = null;
   let previewingSingleModId = null;
   let conversationGoal = null;
+  /** Set true when a mod proposal card is shown in the current sendMessage turn (for analytics). */
+  let conversationTurnHadModCard = false;
   const siteContextCacheByHost = {};
+
+  function captureAnalytics(event, properties = {}) {
+    const p = { ...properties };
+    if (p.hostname === undefined && currentHostname) p.hostname = currentHostname;
+    chrome.runtime.sendMessage({ type: 'POSTHOG_CAPTURE', event, properties: p }).catch(() => {});
+  }
 
   function canonicalHostname(hostname) {
     if (!hostname || typeof hostname !== 'string') return hostname;
@@ -279,11 +287,11 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
     await updateActiveTab();
     chrome.runtime.onMessage.addListener(handleMessage);
 
-    chrome.runtime.sendMessage({
-      type: 'POSTHOG_CAPTURE',
-      event: 'side_panel_opened',
-      properties: { hostname: currentHostname }
-    }).catch(() => {});
+    captureAnalytics('side_panel_opened', {
+      hostname: currentHostname,
+      initial_view: apiKey ? 'chat' : 'settings',
+      has_api_key: !!apiKey
+    });
 
     document.getElementById('btn-send').addEventListener('click', sendMessage);
     document.getElementById('user-input').addEventListener('keydown', (e) => {
@@ -306,22 +314,14 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
       await persistConversationGoal();
       updateGoalUI();
       if (conversationGoal) {
-        chrome.runtime.sendMessage({
-          type: 'POSTHOG_CAPTURE',
-          event: 'goal_set',
-          properties: { hostname: currentHostname }
-        }).catch(() => {});
+        captureAnalytics('goal_set', { goal_length: conversationGoal.length });
       }
     });
     document.getElementById('btn-clear-goal').addEventListener('click', async () => {
       conversationGoal = null;
       await persistConversationGoal();
       updateGoalUI();
-      chrome.runtime.sendMessage({
-        type: 'POSTHOG_CAPTURE',
-        event: 'goal_cleared',
-        properties: { hostname: currentHostname, via: 'button' }
-      }).catch(() => {});
+      captureAnalytics('goal_cleared', { via: 'button' });
     });
 
     document.getElementById('mod-detail-back').addEventListener('click', hideModDetail);
@@ -330,11 +330,7 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
       refinementTargetMod = selectedModForDetail;
       lastAppliedMod = { id: selectedModForDetail.id, description: selectedModForDetail.description, type: selectedModForDetail.type, selector: selectedModForDetail.selector };
       persistLastAppliedMod();
-      chrome.runtime.sendMessage({
-        type: 'POSTHOG_CAPTURE',
-        event: 'refinement_started',
-        properties: { hostname: currentHostname, mod_type: selectedModForDetail.type }
-      }).catch(() => {});
+      captureAnalytics('refinement_started', { mod_type: selectedModForDetail.type });
       const input = document.getElementById('user-input');
       input.placeholder = 'Describe how you want to change this mod...';
       input.focus();
@@ -359,11 +355,7 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
       previewingSingleModId = selectedModForDetail.id;
       document.getElementById('mod-detail-stop-preview').classList.remove('hidden');
       document.getElementById('mod-detail-preview').classList.add('hidden');
-      chrome.runtime.sendMessage({
-        type: 'POSTHOG_CAPTURE',
-        event: 'mod_previewed',
-        properties: { hostname: currentHostname, source: 'detail', mod_type: selectedModForDetail.type }
-      }).catch(() => {});
+      captureAnalytics('mod_previewed', { source: 'detail', mod_type: selectedModForDetail.type });
       addSystemMessage('Previewing this mod only. Click "Stop preview" to restore all mods.');
     });
     document.getElementById('mod-detail-stop-preview').addEventListener('click', async () => {
@@ -371,6 +363,7 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
       previewingSingleModId = null;
       document.getElementById('mod-detail-stop-preview').classList.add('hidden');
       document.getElementById('mod-detail-preview').classList.remove('hidden');
+      captureAnalytics('mod_preview_stopped', { source: 'mod_detail' });
       await chrome.runtime.sendMessage({
         type: 'SEND_TO_CONTENT',
         tabId: currentTabId,
@@ -439,6 +432,7 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
     const settings = await chrome.storage.local.get('settings');
     const current = settings.settings || {};
     await chrome.storage.local.set({ settings: { ...current, modsEnabled: enabled } });
+    captureAnalytics('mods_globally_toggled', { mods_enabled: enabled });
     await refreshContentModsState();
     const modsView = document.getElementById('mods-view');
     if (modsView && modsView.classList.contains('active')) {
@@ -515,11 +509,7 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
     const el = document.getElementById(`${name}-view`);
     if (el) el.classList.add('active');
 
-    chrome.runtime.sendMessage({
-      type: 'POSTHOG_CAPTURE',
-      event: 'view_changed',
-      properties: { view: name, hostname: currentHostname }
-    }).catch(() => {});
+    captureAnalytics('view_changed', { view: name });
 
     if (name === 'mods') {
       selectedModForDetail = null;
@@ -825,9 +815,17 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
     for (;;) {
       const { pass, reason, result } = await runVerifyMod(candidate);
       lastResult = result;
+      captureAnalytics('mod_verify_attempt', {
+        mod_type: candidate.type,
+        attempt: attempt + 1,
+        passed: pass,
+        match_count: typeof result?.matchCount === 'number' ? result.matchCount : undefined,
+        verify_reason: pass ? undefined : (result?.message || reason || 'unknown')
+      });
       if (pass) {
         options.addDisplayToVisible(displayContent);
         addModMessage(candidate, { verificationPassed: true, matchCount: result.matchCount });
+        captureAnalytics('mod_verify_finished', { mod_type: candidate.type, outcome: 'passed', attempts: attempt + 1 });
         return;
       }
       attempt++;
@@ -835,6 +833,7 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
         options.addDisplayToVisible(displayContent);
         addModMessage(candidate, { capHit: true });
         addSystemMessage('Verification didn\'t pass after 3 attempts; you can still try Apply & Save.');
+        captureAnalytics('mod_verify_finished', { mod_type: candidate.type, outcome: 'cap_hit_show_anyway', attempts: attempt });
         return;
       }
       const verifyMsg = '[VERIFY_FAILED] ' + (result.message || 'Verification failed') +
@@ -844,6 +843,7 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
       if (!next.candidate) {
         options.addDisplayToVisible(next.displayContent || displayContent);
         addSystemMessage('No mod in response; try again.');
+        captureAnalytics('mod_verify_finished', { mod_type: candidate.type, outcome: 'no_followup_mod', attempts: attempt });
         return;
       }
       candidate = next.candidate;
@@ -852,6 +852,13 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
   }
 
   function addModMessage(mod, verifyHint) {
+    conversationTurnHadModCard = true;
+    const cardProps = { mod_type: mod.type, source: 'chat' };
+    if (verifyHint) {
+      cardProps.verification_passed = !!verifyHint.verificationPassed;
+      cardProps.verification_cap_hit = !!verifyHint.capHit;
+    }
+    captureAnalytics('mod_card_shown', cardProps);
     const modKey = 'mod_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
     pendingModsByKey[modKey] = mod;
 
@@ -933,25 +940,18 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
         });
       } else if (!result?.ok) {
         addSystemMessage(result?.error || 'Preview failed');
+        captureAnalytics('mod_preview_failed', { source: 'chat_card', mod_type: mod.type });
         return;
       }
       previewingModKeyInChat = key;
       updatePreviewButtonsInChat();
-      chrome.runtime.sendMessage({
-        type: 'POSTHOG_CAPTURE',
-        event: 'mod_previewed',
-        properties: { hostname: currentHostname, source: 'chat', mod_type: mod.type }
-      }).catch(() => {});
+      captureAnalytics('mod_previewed', { source: 'chat_card', mod_type: mod.type });
     });
 
     msgEl.querySelector('.btn-reject').addEventListener('click', (e) => {
       stopPreviewMod();
       msgEl.style.opacity = '0.5';
-      chrome.runtime.sendMessage({
-        type: 'POSTHOG_CAPTURE',
-        event: 'mod_rejected',
-        properties: { hostname: currentHostname, mod_type: mod.type }
-      }).catch(() => {});
+      captureAnalytics('mod_rejected', { mod_type: mod.type });
       addSystemMessage('Mod rejected. Tell me what to change.');
     });
 
@@ -984,13 +984,17 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
         const applyAnyway = confirm(
           `This selector matches ${result.matchCount} elements. Applying may hide or change more than intended. Apply anyway?`
         );
-        if (!applyAnyway) return;
+        if (!applyAnyway) {
+          captureAnalytics('apply_cancelled_wide_selector', { mod_type: mod.type, match_count: result.matchCount });
+          return;
+        }
         modToApply = { ...mod, forceSelectorWarning: true };
         continue;
       }
 
       if (!result.ok) {
         addSystemMessage(`Failed to apply: ${result.error || 'Unknown error'}`);
+        captureAnalytics('apply_failed', { mod_type: mod.type, stage: 'apply_to_page', error: String(result.error || 'unknown') });
         return;
       }
 
@@ -1007,28 +1011,31 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
 
     if (!currentHostname) {
       addSystemMessage('Cannot save: no hostname (are you on a normal web page?).');
+      captureAnalytics('apply_failed', { mod_type: mod.type, stage: 'no_hostname' });
       return;
     }
 
     const saveResponse = await chrome.runtime.sendMessage({
       type: 'SAVE_MOD',
       hostname: currentHostname,
-      mod: mod
+      mod: mod,
+      source: 'apply_and_save_chat'
     });
 
     if (!saveResponse?.ok) {
       addSystemMessage(`Save failed: ${saveResponse?.error || 'unknown error'}`);
+      captureAnalytics('apply_failed', { mod_type: mod.type, stage: 'save', error: String(saveResponse?.error || 'unknown') });
       return;
     }
 
     lastAppliedMod = { id: mod.id, description: mod.description, type: mod.type, selector: mod.selector };
     await persistLastAppliedMod();
 
-    chrome.runtime.sendMessage({
-      type: 'POSTHOG_CAPTURE',
-      event: 'apply_and_save',
-      properties: { hostname: currentHostname, is_update: isUpdate, mod_type: mod.type }
-    }).catch(() => {});
+    captureAnalytics('apply_and_save', {
+      is_update: isUpdate,
+      mod_type: mod.type,
+      source: 'chat_card'
+    });
 
     if (buttonEl) {
       buttonEl.textContent = 'Applied!';
@@ -1048,14 +1055,13 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
     const wrap = document.createElement('div');
     wrap.className = 'message system did-this-work-wrap';
     wrap.innerHTML = '<span class="did-this-work-label">Did this work?</span> <button type="button" class="btn-did-work yes">Yes</button> <button type="button" class="btn-did-work no">No</button>';
-    wrap.querySelector('.btn-did-work.yes').addEventListener('click', () => wrap.remove());
+    wrap.querySelector('.btn-did-work.yes').addEventListener('click', () => {
+      captureAnalytics('did_this_work_yes');
+      wrap.remove();
+    });
     wrap.querySelector('.btn-did-work.no').addEventListener('click', () => {
       wrap.remove();
-      chrome.runtime.sendMessage({
-        type: 'POSTHOG_CAPTURE',
-        event: 'did_this_work_no',
-        properties: { hostname: currentHostname }
-      }).catch(() => {});
+      captureAnalytics('did_this_work_no');
       sendMessage('That didn\'t work—please re-investigate and suggest a different mod.');
     });
     messagesEl.appendChild(wrap);
@@ -1083,16 +1089,13 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
       }
     } else if (!result?.ok) {
       addSystemMessage(result?.error || 'Preview failed');
+      captureAnalytics('mod_preview_failed', { source: 'chat_legacy', mod_type: mod.type });
       return;
     }
     if (buttonEl) {
       buttonEl.textContent = 'Previewing (refresh to undo)';
     }
-    chrome.runtime.sendMessage({
-      type: 'POSTHOG_CAPTURE',
-      event: 'mod_previewed',
-      properties: { hostname: currentHostname, source: 'chat', mod_type: mod.type }
-    }).catch(() => {});
+    captureAnalytics('mod_previewed', { source: 'chat_legacy', mod_type: mod.type });
   }
 
   function generateTraceId() {
@@ -1118,6 +1121,8 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
       addSystemMessage('Open a website (http or https) in the active tab to use Mod.');
       return;
     }
+
+    conversationTurnHadModCard = false;
 
     const hadElementContext = !!selectedElementContext;
     const wasRefiningMod = refinementTargetMod;
@@ -1184,11 +1189,7 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
       conversationGoal = null;
       persistConversationGoal().catch(() => {});
       updateGoalUI();
-      chrome.runtime.sendMessage({
-        type: 'POSTHOG_CAPTURE',
-        event: 'goal_cleared',
-        properties: { hostname: currentHostname, via: 'message' }
-      }).catch(() => {});
+      captureAnalytics('goal_cleared', { via: 'message' });
     }
 
     const progressState = { goalThisTurn: '', stepsTaken: [], lastProposal: null, lastVerifyResult: null, retryAttempt: 0, learned: [] };
@@ -1211,17 +1212,15 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
     conversationHistory.push({ role: 'user', content: fullMessage });
 
     const traceId = generateTraceId();
-    chrome.runtime.sendMessage({
-      type: 'POSTHOG_CAPTURE',
-      event: 'message_sent',
-      properties: {
-        has_element_context: hadElementContext,
-        has_last_applied_mod: !!lastAppliedMod,
-        has_landmarks: hasLandmarks,
-        hostname: currentHostname,
-        indicates_mod_failure: indicatesModFailure
-      }
-    }).catch(() => {});
+    captureAnalytics('message_sent', {
+      has_element_context: hadElementContext,
+      has_last_applied_mod: !!lastAppliedMod,
+      has_landmarks: hasLandmarks,
+      indicates_mod_failure: indicatesModFailure,
+      message_length: text.length,
+      has_conversation_goal: !!conversationGoal,
+      was_refinement_context: wasRefiningMod
+    });
 
     // Allow enough tool rounds for full agentic chains (e.g. detect_framework → get_component_summary → find_elements → simulate_mod_effect → mod).
     // Loop stops when the model returns no tool block or we hit the cap (Cursor-style: keep going until the model is "done" or we guard against runaway).
@@ -1231,7 +1230,9 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
     const toolsRunThisTurn = [];
     let modAddedViaProposeThisTurn = false;
     let nudgedForMissingToolsThisTurn = false;
+    let conversationTurnEndedReason = 'incomplete';
 
+    try {
     while (round <= MAX_TOOL_ROUNDS) {
       addThinkingIndicator();
 
@@ -1247,6 +1248,7 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
 
       if (!response.ok) {
         addSystemMessage(`Error: ${response.error}`);
+        conversationTurnEndedReason = round === 0 ? 'ai_error_first_round' : 'ai_error';
         if (round === 0) conversationHistory.pop();
         return;
       }
@@ -1270,7 +1272,7 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
 
         const toolsBlockStart = lastAiText.indexOf('```tools');
         const textBeforeTools = toolsBlockStart >= 0 ? lastAiText.substring(0, toolsBlockStart).trim() : '';
-        const { toolResultsText, proposedMod } = await runAgentTools(toolCalls);
+        const { toolResultsText, proposedMod } = await runAgentTools(toolCalls, { ai_round: round, phase: 'main' });
 
         if (proposedMod && proposedMod.id && lastAppliedMod && proposedMod.id === lastAppliedMod.id) {
           if (textBeforeTools) addAgentThinkingMessage(textBeforeTools);
@@ -1278,6 +1280,7 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
           addAgentToolResultsMessage(toolResultsText);
           modAddedViaProposeThisTurn = true;
           await autoApplyRefinement(proposedMod);
+          conversationTurnEndedReason = 'refinement_auto_applied_via_tools';
           break;
         }
 
@@ -1330,7 +1333,7 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
               let candidate = null;
               let displayContent = null;
               if (parsedCalls && parsedCalls.length > 0) {
-                const { toolResultsText: resText, proposedMod: propMod } = await runAgentTools(parsedCalls);
+                const { toolResultsText: resText, proposedMod: propMod } = await runAgentTools(parsedCalls, { phase: 'verify_recovery' });
                 candidate = propMod || null;
                 const tbtStart = responseText.indexOf('```tools');
                 const tbt = tbtStart >= 0 ? responseText.substring(0, tbtStart).trim() : '';
@@ -1349,6 +1352,7 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
               return { candidate, displayContent };
             }
           });
+          conversationTurnEndedReason = 'mod_card_dom_verify_flow';
           break;
         }
 
@@ -1356,11 +1360,6 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
         addAgentToolCallsMessage(toolCalls);
         addAgentToolResultsMessage(toolResultsText);
         conversationHistory.push({ role: 'user', content: 'Tool results:\n' + toolResultsText });
-        chrome.runtime.sendMessage({
-          type: 'POSTHOG_CAPTURE',
-          event: 'agent_tools_used',
-          properties: { tools: toolNames, round: round + 1, hostname: currentHostname }
-        }).catch(() => {});
         round++;
         continue;
       }
@@ -1372,6 +1371,7 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
           if (mod.type === 'js-safe') {
             addMessage('assistant', lastAiText);
             addSystemMessage('This version of Mod supports only CSS and "hide element" mods. Try asking to hide an element or change styles with CSS.');
+            conversationTurnEndedReason = 'blocked_js_mod';
             return;
           }
 
@@ -1394,11 +1394,13 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
             if (isRefinement) {
               if (beforeJson) addMessage('assistant', beforeJson);
               await autoApplyRefinement(mod);
+              conversationTurnEndedReason = 'refinement_auto_applied_json';
               break;
             }
             if (mod.type === 'css') {
               if (beforeJson) addMessage('assistant', beforeJson);
               addModMessage(mod);
+              conversationTurnEndedReason = 'mod_card_css_json';
               break;
             }
             if (mod.type === 'dom-hide' || mod.type === 'dom-hide-contains-text') {
@@ -1438,7 +1440,7 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
                   let candidate = null;
                   let displayContent = null;
                   if (parsedCalls && parsedCalls.length > 0) {
-                    const { toolResultsText: resText, proposedMod: propMod } = await runAgentTools(parsedCalls);
+                    const { toolResultsText: resText, proposedMod: propMod } = await runAgentTools(parsedCalls, { phase: 'verify_recovery' });
                     candidate = propMod || null;
                     const tbtStart = responseText.indexOf('```tools');
                     const tbt = tbtStart >= 0 ? responseText.substring(0, tbtStart).trim() : '';
@@ -1457,16 +1459,21 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
                   return { candidate, displayContent };
                 }
               });
+              conversationTurnEndedReason = 'mod_card_dom_verify_json';
               break;
             }
             if (beforeJson) addMessage('assistant', beforeJson);
             addModMessage(mod);
+          }
+          if (conversationTurnEndedReason === 'incomplete') {
+            conversationTurnEndedReason = 'mod_card_generic_json';
           }
           break;
         } catch (e) {
           const displayText = stripHiddenBlocks(lastAiText);
           addMessage('assistant', displayText || lastAiText);
           addSystemMessage('(Could not parse modification. The AI may need another try.)');
+          conversationTurnEndedReason = 'mod_json_parse_error';
           break;
         }
       } else {
@@ -1484,8 +1491,21 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
           continue;
         }
         addMessage('assistant', displayText || lastAiText);
+        conversationTurnEndedReason = 'assistant_text_only';
         break;
       }
+    }
+    } finally {
+      captureAnalytics('conversation_turn_completed', {
+        trace_id: traceId,
+        ended_reason: conversationTurnEndedReason,
+        ai_rounds_used: round,
+        distinct_tools: toolsRunThisTurn,
+        distinct_tool_count: toolsRunThisTurn.length,
+        had_element_context: hadElementContext,
+        was_refinement_prompt: wasRefiningMod,
+        mod_card_offered: conversationTurnHadModCard
+      });
     }
   }
 
@@ -1493,7 +1513,10 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
     return 'mod_' + Math.random().toString(36).slice(2, 11);
   }
 
-  async function runAgentTools(calls) {
+  async function runAgentTools(calls, batchMeta = {}) {
+    const phase = batchMeta.phase || 'main';
+    const aiRound = typeof batchMeta.ai_round === 'number' ? batchMeta.ai_round : undefined;
+
     const validCalls = calls
       .map((call, index) => ({ call, index, name: call.name || call.tool, params: call.params || call.arguments || {} }))
       .filter(({ name }) => name);
@@ -1501,10 +1524,12 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
     const runOne = async ({ call, index, name, params }) => {
       try {
         let result;
+        let execOk = true;
         if (name === 'get_site_knowledge') {
           const sk = await chrome.runtime.sendMessage({ type: 'GET_SITE_KNOWLEDGE', hostname: currentHostname });
           const emptySk = { framework: null, lastDetectedAt: null, successfulSelectors: [], existingMods: [] };
           result = currentHostname ? (sk || emptySk) : { ...emptySk, error: 'No hostname (no active tab or internal page).' };
+          if (result && typeof result === 'object' && result.error) execOk = false;
         } else if (name === 'get_recent_network_errors') {
           const net = await chrome.runtime.sendMessage({ type: 'GET_RECENT_NETWORK_ERRORS', tabId: currentTabId });
           result = net || { recent: [], message: 'Unknown' };
@@ -1524,23 +1549,51 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
             mod,
             message: 'Mod proposed. Use verify_mod to confirm scope, or the user can Apply & Save.'
           };
-          return { index, name, result, proposedMod: mod };
+          return { index, name, result, proposedMod: mod, execOk: true };
         } else {
           const res = await chrome.runtime.sendMessage({
             type: 'SEND_TO_CONTENT',
             tabId: currentTabId,
             payload: { type: 'AGENT_TOOL', tool: name, params }
           });
+          execOk = !!res?.ok;
           result = res?.ok ? res.result : (res?.error || res);
         }
-        return { index, name, result, proposedMod: null };
+        return { index, name, result, proposedMod: null, execOk };
       } catch (e) {
-        return { index, name, result: { error: e.message }, proposedMod: null };
+        return { index, name, result: { error: e.message }, proposedMod: null, execOk: false };
       }
     };
 
     const outcomes = await Promise.all(validCalls.map(runOne));
     outcomes.sort((a, b) => a.index - b.index);
+
+    const toolNamesOrdered = outcomes.map((o) => o.name);
+    if (toolNamesOrdered.length > 0) {
+      for (const o of outcomes) {
+        captureAnalytics('agent_tool_executed', {
+          tool: o.name,
+          success: o.execOk === true,
+          phase,
+          ai_round: aiRound
+        });
+      }
+      captureAnalytics('agent_tools_batch', {
+        tools: toolNamesOrdered,
+        tool_count: toolNamesOrdered.length,
+        phase,
+        ai_round: aiRound,
+        has_proposed_mod: outcomes.some((o) => !!o.proposedMod),
+        all_succeeded: outcomes.every((o) => o.execOk === true)
+      });
+      captureAnalytics('agent_tools_used', {
+        tools: toolNamesOrdered,
+        round: aiRound != null ? aiRound + 1 : undefined,
+        phase,
+        tool_count: toolNamesOrdered.length
+      });
+    }
+
     const lines = [];
     let proposedModFromTool = null;
     const host = canonicalHostname(currentHostname);
@@ -1596,7 +1649,8 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
     const saveResponse = await chrome.runtime.sendMessage({
       type: 'SAVE_MOD',
       hostname: currentHostname,
-      mod: mod
+      mod: mod,
+      source: 'refinement_auto_apply'
     });
     if (!saveResponse?.ok) {
       addSystemMessage(`Save failed: ${saveResponse?.error || 'unknown error'}.`);
@@ -1607,11 +1661,7 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
     updateModCount();
     addSystemMessage('Updated. You can keep refining or ask for something else.');
 
-    chrome.runtime.sendMessage({
-      type: 'POSTHOG_CAPTURE',
-      event: 'refinement_auto_applied',
-      properties: { hostname: currentHostname, mod_type: mod.type }
-    }).catch(() => {});
+    captureAnalytics('refinement_auto_applied', { mod_type: mod.type });
   }
 
   function activateSelector() {
@@ -1636,11 +1686,7 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
     };
     document.addEventListener('keydown', escapeListener);
 
-    chrome.runtime.sendMessage({
-      type: 'POSTHOG_CAPTURE',
-      event: 'selector_activated',
-      properties: { hostname: currentHostname }
-    }).catch(() => {});
+    captureAnalytics('selector_activated');
 
     chrome.runtime.sendMessage({
       type: 'SEND_TO_CONTENT',
@@ -1720,7 +1766,8 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
             type: 'TOGGLE_MOD',
             hostname: currentHostname,
             modId: input.dataset.id,
-            enabled
+            enabled,
+            source: 'mods_list'
           });
           await refreshContentModsState();
           addSystemMessage('Updated on this page.');
@@ -1806,11 +1853,7 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
     const token = modToSharePayload(mod);
     try {
       await navigator.clipboard.writeText(token);
-      chrome.runtime.sendMessage({
-        type: 'POSTHOG_CAPTURE',
-        event: 'mod_shared',
-        properties: { hostname: currentHostname, mod_type: mod.type }
-      }).catch(() => {});
+    captureAnalytics('mod_shared', { mod_type: mod.type });
       showSideToast(
         'Copied to clipboard. On the Mods tab, paste under Import a shared mod, then click Add to this site (for the site open in the tab).'
       );
@@ -1851,7 +1894,8 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
     const saveRes = await chrome.runtime.sendMessage({
       type: 'SAVE_MOD',
       hostname: currentHostname,
-      mod: parsed
+      mod: parsed,
+      source: 'import_paste'
     });
     if (!saveRes?.ok) {
       showImportFeedback('Save failed: ' + (saveRes?.error || 'unknown'), true);
@@ -1861,11 +1905,7 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
     showImportFeedback('Mod added. Refresh the page or toggle Mods to see it.');
     renderModsList();
     updateModCount();
-    chrome.runtime.sendMessage({
-      type: 'POSTHOG_CAPTURE',
-      event: 'mod_imported',
-      properties: { hostname: currentHostname, mod_type: parsed.type }
-    }).catch(() => {});
+    captureAnalytics('mod_imported', { mod_type: parsed.type, source: 'import_paste' });
   }
 
   async function saveSettings() {
@@ -1873,11 +1913,7 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
     apiKey = key;
     const current = (await chrome.storage.local.get('settings')).settings || {};
     await chrome.storage.local.set({ settings: { ...current, apiKey: key } });
-    chrome.runtime.sendMessage({
-      type: 'POSTHOG_CAPTURE',
-      event: 'settings_saved',
-      properties: { field: 'api_key' }
-    }).catch(() => {});
+    captureAnalytics('settings_saved', { field: 'api_key', has_value: key.length > 0 });
     addSystemMessage('API key saved.');
     showView('chat');
   }
@@ -1896,7 +1932,10 @@ If a request requires JavaScript, explain that only CSS and hiding are supported
         break;
       case 'TAB_UPDATED':
         updateActiveTab().then(() => {
-          if (currentHostname) addSystemMessage('Switched to ' + currentHostname + '. Context updated for this tab.');
+          if (currentHostname) {
+            addSystemMessage('Switched to ' + currentHostname + '. Context updated for this tab.');
+            captureAnalytics('active_tab_changed', { hostname: currentHostname });
+          }
         });
         conversationHistory = [];
         break;
